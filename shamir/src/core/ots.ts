@@ -1,13 +1,19 @@
 // OpenTimestamps：可选的哈希存证（用户勾选才会联网）
 //
-// .ots 回执格式（依 opentimestamps 源码）：
-//   HEADER_MAGIC(31B) + varuint(major) + fileHashOp(0x08 = SHA256) + fileDigest(32B) + timestamp 流
+// 日历 POST /digest 返回的是**裸 Timestamp 流**（无 DetachedTimestampFile 头、不含摘要）：
+//   序列化（依 python-opentimestamps timestamp.py）：
+//     多 attestation 时除最后一个外，每个前缀 `\xff\x00` + attestation
+//     无 ops：`\x00` + 最后一个 attestation
+//     有 ops：有 attestation 时先 `\xff\x00` + 最后 attestation；
+//             除最后一个 op 外每个前缀 `\xff` + op + 子时间戳；最后 op + 子时间戳
+//   op 编码：tag 字节。0x02 SHA1 / 0x03 RIPEMD160 / 0x08 SHA256（无参）；
+//            0xf0 APPEND / 0xf1 PREPEND（varbytes 参数）；0xf2 REVERSE / 0xf3 HEXLIFY
 //   attestation = 8B TAG + varbytes(payload)
 //     PendingAttestation  TAG 83dfe30d2ef90c8e  payload = varbytes(uri)
 //     BitcoinAttestation  TAG 0588960d73d71901  payload = varuint(height)
 //
-// 离线可验证：回执头里的 fileDigest 与原文件 SHA-256 比对（fileDigest 明文存储）。
-// 在线完整验证：重放 ops 得到被锚定摘要（= merkle root），与区块链头比对。
+// 被锚定摘要 = 初始消息（我们提交的文件 SHA-256）逐 op 重放的结果（= merkle root）。
+// 本解析器同时兼容带 DetachedTimestampFile 头的 .ots（自动剥头）。
 
 import { cat, toHex } from './b64.ts'
 import { sha256 } from './crypto.ts'
@@ -19,28 +25,18 @@ const OTS_HEADER_MAGIC = Uint8Array.from([
 ])
 const PENDING_TAG = Uint8Array.from([0x83, 0xdf, 0xe3, 0x0d, 0x2e, 0xf9, 0x0c, 0x8e])
 const BITCOIN_TAG = Uint8Array.from([0x05, 0x88, 0x96, 0x0d, 0x73, 0xd7, 0x19, 0x01])
-const OP_SHA256 = 0x08
-const OP_APPEND = 0xf0
-const OP_PREPEND = 0xf1
-const OP_REVERSE = 0xf2
-const OP_HEXLIFY = 0xf3
 
 const CALENDAR = 'https://a.pool.opentimestamps.org/digest'
 const BLOCK_SOURCE = 'https://mempool.space/api'
 
-export interface BitcoinAnchor {
-  height: number
-  /** 该锚点处的被锚定摘要（= 区块 merkle root，重放得到） */
-  digest: Uint8Array
-}
+export type OtsAttestation =
+  | { kind: 'pending'; uri: string; digest: Uint8Array | null }
+  | { kind: 'bitcoin'; height: number; digest: Uint8Array | null }
 
 export interface OtsParse {
-  /** 回执锚定的原文件摘要（.ots 明文存储，离线比对用） */
-  fileDigest: Uint8Array
-  pendingUris: string[]
-  anchors: BitcoinAnchor[]
-  /** 结构是否完整重放（false = 有未识别的结构，仅部分解析） */
-  complete: boolean
+  attestations: OtsAttestation[]
+  /** 结构没走全（不认识的 op/attestation、无法重放等），摘要结果可能不完整 */
+  degraded: boolean
 }
 
 function readVarint(b: Uint8Array, off: number): { value: number; next: number } | null {
@@ -63,73 +59,143 @@ function tagAt(b: Uint8Array, off: number, tag: Uint8Array): boolean {
   return tag.every((t, i) => b[off + i] === t)
 }
 
-export async function parseOts(b: Uint8Array): Promise<OtsParse> {
-  const r: OtsParse = { fileDigest: new Uint8Array(0), pendingUris: [], anchors: [], complete: false }
-  // 头部：magic + varuint(major) + fileHashOp + fileDigest(32B)
-  if (b.length < OTS_HEADER_MAGIC.length + 2 || !OTS_HEADER_MAGIC.every((m, i) => b[i] === m))
-    throw new Error('不是有效的 .ots 回执')
-  let off = OTS_HEADER_MAGIC.length
-  const v = readVarint(b, off)
-  if (!v) throw new Error('.ots 回执头损坏')
-  off = v.next
-  if (b[off] !== OP_SHA256) throw new Error('.ots 回执使用了不支持的哈希算子（仅支持 SHA-256）')
-  off += 1
-  r.fileDigest = b.slice(off, off + 32)
-  if (r.fileDigest.length !== 32) throw new Error('.ots 回执缺少文件摘要')
-  off += 32
-
-  // timestamp 流线性重放（无分叉的常规回执；遇到未知结构降级为部分解析）
-  let msg = r.fileDigest
-  let pos = off
-  while (pos < b.length) {
-    const op = b[pos]!
-    if (op === OP_SHA256) {
-      msg = await sha256(msg)
-      pos += 1
-    } else if (op === OP_APPEND || op === OP_PREPEND) {
-      const v2 = readVarint(b, pos + 1)
-      if (!v2 || v2.next + v2.value > b.length) { pos = b.length + 1; break }
-      const arg = b.slice(v2.next, v2.next + v2.value)
-      msg = op === OP_APPEND ? cat(msg, arg) : cat(arg, msg)
-      pos = v2.next + v2.value
-    } else if (op === OP_REVERSE) {
-      msg = msg.slice().reverse()
-      pos += 1
-    } else if (op === OP_HEXLIFY) {
-      msg = new TextEncoder().encode(toHex(msg))
-      pos += 1
-    } else if (tagAt(b, pos, PENDING_TAG)) {
-      const v2 = readVarint(b, pos + 8)
-      if (!v2 || v2.next + v2.value > b.length) { pos = b.length + 1; break }
-      const payload = b.slice(v2.next, v2.next + v2.value)
-      const vu = readVarint(payload, 0)
-      if (vu) r.pendingUris.push(new TextDecoder().decode(payload.subarray(vu.next, vu.next + vu.value)))
-      pos = v2.next + v2.value
-    } else if (tagAt(b, pos, BITCOIN_TAG)) {
-      const v2 = readVarint(b, pos + 8)
-      if (!v2 || v2.next + v2.value > b.length) { pos = b.length + 1; break }
-      const vh = readVarint(b.slice(v2.next, v2.next + v2.value), 0)
-      if (vh && vh.value > 0 && vh.value < 100_000_000)
-        r.anchors.push({ height: vh.value, digest: msg })
-      pos = v2.next + v2.value
-    } else {
-      pos = b.length + 1 // 未知结构
-      break
+/** 在 pos 处读取并应用一个 op；返回新消息与下一位置。无法处理返回 null（降级）。 */
+async function applyOp(
+  b: Uint8Array,
+  msg: Uint8Array | null,
+  pos: number,
+): Promise<{ msg: Uint8Array; next: number } | null> {
+  const op = b[pos]!
+  const next = pos + 1
+  if (msg === null) return null // 所有已支持 op 都需要初始消息才能重放
+  switch (op) {
+    case 0x08: // SHA256
+      return { msg: await sha256(msg), next }
+    case 0x02: // SHA1
+      return { msg: new Uint8Array(await crypto.subtle.digest('SHA-1', msg)), next }
+    case 0xf0: { // APPEND
+      const v = readVarint(b, next)
+      if (!v || v.next + v.value > b.length) return null
+      return { msg: cat(msg, b.slice(v.next, v.next + v.value)), next: v.next + v.value }
     }
+    case 0xf1: { // PREPEND
+      const v = readVarint(b, next)
+      if (!v || v.next + v.value > b.length) return null
+      return { msg: cat(b.slice(v.next, v.next + v.value), msg), next: v.next + v.value }
+    }
+    case 0xf2: // REVERSE
+      return { msg: msg.slice().reverse(), next }
+    case 0xf3: // HEXLIFY
+      return { msg: new TextEncoder().encode(toHex(msg)), next }
+    default: // 0x03 RIPEMD160 / 0x67 KECCAK256 / 其他未知 op：WebCrypto 不支持，降级
+      return null
   }
-  r.complete = pos === b.length
+}
+
+/** 在 pos 处读取一个 attestation（8B TAG + varbytes payload），返回下一位置 */
+function readAttestation(b: Uint8Array, msg: Uint8Array | null, pos: number, r: OtsParse): number {
+  if (pos + 9 > b.length) {
+    r.degraded = true
+    return b.length
+  }
+  const v = readVarint(b, pos + 8)
+  if (!v || v.next + v.value > b.length) {
+    r.degraded = true
+    return b.length
+  }
+  const payload = b.slice(v.next, v.next + v.value)
+  if (tagAt(b, pos, PENDING_TAG)) {
+    const vu = readVarint(payload, 0)
+    const uri = vu ? new TextDecoder().decode(payload.subarray(vu.next, vu.next + vu.value)) : ''
+    r.attestations.push({ kind: 'pending', uri, digest: msg ? msg.slice() : null })
+  } else if (tagAt(b, pos, BITCOIN_TAG)) {
+    const vh = readVarint(payload, 0)
+    if (vh && vh.value > 0 && vh.value < 100_000_000)
+      r.attestations.push({ kind: 'bitcoin', height: vh.value, digest: msg ? msg.slice() : null })
+  }
+  // 其他 attestation（Litecoin / Unknown）跳过
+  return v.next + v.value
+}
+
+/** 递归走一个 Timestamp 分支，返回分支结束位置 */
+async function walkTs(
+  b: Uint8Array,
+  msg: Uint8Array | null,
+  pos: number,
+  r: OtsParse,
+  depth: number,
+): Promise<number> {
+  if (depth > 256) {
+    r.degraded = true
+    return b.length
+  }
+  while (pos < b.length) {
+    const tag = b[pos]!
+    pos += 1
+    if (tag === 0xff) {
+      if (b[pos] === 0x00) {
+        pos += 1
+        pos = readAttestation(b, msg, pos, r)
+        continue
+      }
+      // fork：op + 子时间戳（从 op 结果出发的另一条分支）
+      const applied = await applyOp(b, msg, pos)
+      if (!applied) {
+        r.degraded = true
+        return b.length
+      }
+      pos = await walkTs(b, applied.msg, applied.next, r, depth + 1)
+      continue
+    }
+    if (tag === 0x00) {
+      pos = readAttestation(b, msg, pos, r)
+      continue
+    }
+    // 最后一个 op：其后是内层时间戳，递归消费到分支末尾
+    const applied = await applyOp(b, msg, pos - 1)
+    if (!applied) {
+      r.degraded = true
+      return b.length
+    }
+    return walkTs(b, applied.msg, applied.next, r, depth + 1)
+  }
+  return pos
+}
+
+/**
+ * 解析 OTS 回执。
+ * @param receipt 日历返回的裸 Timestamp 流（或带 DetachedTimestampFile 头的 .ots，自动剥头）
+ * @param initialMsg 回执的初始消息（= 拆分时提交的文件 SHA-256），重放 ops 得到被锚定摘要
+ */
+export async function parseOts(receipt: Uint8Array, initialMsg?: Uint8Array): Promise<OtsParse> {
+  const r: OtsParse = { attestations: [], degraded: false }
+  let msg: Uint8Array | null = initialMsg ?? null
+  let pos = 0
+
+  if (tagAt(receipt, 0, OTS_HEADER_MAGIC)) {
+    // DetachedTimestampFile：magic + varuint(major) + fileHashOp(1B) + fileDigest(32B)
+    pos = OTS_HEADER_MAGIC.length
+    const v = readVarint(receipt, pos)
+    if (!v || v.next + 33 > receipt.length) throw new Error('.ots 回执头损坏')
+    pos = v.next
+    msg = receipt.slice(pos + 1, pos + 33)
+    pos += 33
+  }
+
+  const end = await walkTs(receipt, msg, pos, r, 0)
+  if (end !== receipt.length) r.degraded = true
   return r
 }
 
-/** 向 OTS 日历提交文件摘要，返回 .ots 回执。仅在用户明确勾选时调用。 */
-export async function otsStamp(fileDigest: Uint8Array, timeoutMs = 15000): Promise<Uint8Array> {
+/** 向 OTS 日历提交文件摘要，返回裸 Timestamp 回执。仅在用户明确勾选时调用。 */
+export async function otsStamp(fileDigest: Uint8Array, timeoutMs = 20000): Promise<Uint8Array> {
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), timeoutMs)
   try {
     const res = await fetch(CALENDAR, { method: 'POST', body: toHex(fileDigest), signal: ctl.signal })
     if (!res.ok) throw new Error(`OTS 日历返回 ${res.status}`)
     const buf = new Uint8Array(await res.arrayBuffer())
-    if (buf.length < 40) throw new Error('OTS 回执异常（过短）')
+    if (buf.length < 10) throw new Error('OTS 回执异常（过短）')
     return buf
   } finally {
     clearTimeout(timer)
@@ -143,8 +209,10 @@ export interface OtsOnlineVerify {
   detail: string
 }
 
-/** 在线完整验证：按高度拉区块头，比对 merkle root（需联网，用户点击触发） */
-export async function verifyAnchorOnline(a: BitcoinAnchor): Promise<OtsOnlineVerify> {
+/** 在线完整验证：按高度拉区块头，比对被锚定摘要与 merkle root（需联网，用户点击触发） */
+export async function verifyAnchorOnline(a: { height: number; digest: Uint8Array | null }): Promise<OtsOnlineVerify> {
+  const digest = a.digest
+  if (!digest) throw new Error('回执结构降级，无法重放出被锚定摘要，不能在线验证')
   const hashRes = await fetch(`${BLOCK_SOURCE}/block-height/${a.height}`)
   if (!hashRes.ok) throw new Error(`获取区块哈希失败（${hashRes.status}）`)
   const hash = (await hashRes.text()).trim()
@@ -155,13 +223,11 @@ export async function verifyAnchorOnline(a: BitcoinAnchor): Promise<OtsOnlineVer
   )
   const merkleRoot = header.slice(36, 68)
   const blockTime = new DataView(header.buffer).getUint32(68, true) * 1000
-  const ok = merkleRoot.every((x, i) => x === a.digest[i])
+  const ok = merkleRoot.every((x, i) => x === digest[i])
   return {
     height: a.height,
     blockTime,
     ok,
-    detail: ok
-      ? '回执摘要与区块 merkle root 一致'
-      : '回执摘要与区块 merkle root 不一致',
+    detail: ok ? '回执摘要与区块 merkle root 一致' : '回执摘要与区块 merkle root 不一致',
   }
 }

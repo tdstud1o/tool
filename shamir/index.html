@@ -42,7 +42,6 @@
           <div id="dropSplit" class="drop" tabindex="0">
             <span id="dropSplitText">拖文件到这里，或点击选择</span>
           </div>
-          <input id="fileSplit" type="file" hidden />
 
           <h2>② 设置 k / n</h2>
           <div class="kn-row">
@@ -57,43 +56,56 @@
           </label>
 
           <button id="btnSplit" class="btn btn-primary" type="button" disabled>拆分</button>
+          <div id="runProg" class="prog" hidden><div class="prog-bar"></div></div>
+          <div id="runLog" class="run-log" hidden></div>
           <div id="splitError" class="msg msg-error" hidden></div>
           <div id="splitWarn" class="msg msg-warn" hidden></div>
         </div>
 
         <div id="resultCard" class="card" hidden>
           <h2>③ 保存产物</h2>
-          <div class="prod-head">
-            <div class="prod ct-prod">
-              <div class="prod-name" id="ctName">…</div>
-              <div class="prod-meta" id="ctMeta"></div>
-              <button class="btn btn-ghost" id="btnDlCt" type="button">下载密文</button>
-            </div>
+          <div class="naming">
+            <label class="naming-label">产物命名
+              <select id="nameOpt">
+                <option value="date">YYYYMMDD-文件名</option>
+                <option value="name" selected>文件名</option>
+                <option value="uuid">随机 UUID</option>
+                <option value="custom">自定义前缀</option>
+              </select>
+            </label>
+            <input id="namePrefix" type="text" placeholder="前缀，如 backup-" hidden />
+          </div>
+          <div class="prod">
+            <div class="prod-name" id="ctName">…</div>
+            <div class="prod-meta" id="ctMeta"></div>
+            <button class="btn btn-ghost" id="btnDlCt" type="button">下载密文</button>
           </div>
           <div id="otsBox" class="ots-box" hidden></div>
-          <div class="prod-head"><div class="prod-title">分片（每人一片，注意编号）</div></div>
+          <div class="prod-title">分片（每人一片，注意编号）</div>
           <div id="shareList" class="share-list"></div>
           <button class="btn btn-ghost" id="btnDlAll" type="button">下载全部（密文 + 分片）</button>
         </div>
       </section>
 
-      <!-- ============ 恢复 ============ -->
+      <!-- ============ 恢复（先密文，后分片）============ -->
       <section id="view-restore" class="view" hidden>
         <div class="card">
-          <h2>① 导入分片（至少 k 片）</h2>
+          <h2>① 选择密文文件</h2>
+          <div id="dropCt" class="drop" tabindex="0">
+            <span id="dropCtText">拖密文（.smcf）到这里，或点击选择</span>
+          </div>
+          <div id="ctInfo" class="ct-info" hidden></div>
+
+          <h2>② 导入分片</h2>
           <textarea id="shareText" rows="5" spellcheck="false" placeholder="把分片文本贴进来，每行一条：SHAMIR1:k:n:base64…"></textarea>
           <label class="btn btn-ghost file-label">从文件导入分片
             <input id="shareFiles" type="file" multiple accept=".txt,.share,.shares,text/plain" hidden />
           </label>
           <div id="shareStatus" class="hint"></div>
 
-          <h2>② 选择密文文件</h2>
-          <div id="dropCt" class="drop" tabindex="0">
-            <span id="dropCtText">拖密文（.smcf）到这里，或点击选择</span>
-          </div>
-          <input id="fileCt" type="file" accept=".smcf,application/octet-stream" hidden />
-
           <button id="btnRestore" class="btn btn-primary" type="button" disabled>恢复文件</button>
+          <div id="restoreProg" class="prog" hidden><div class="prog-bar"></div></div>
+          <div id="restoreLog" class="run-log" hidden></div>
           <div id="restoreError" class="msg msg-error" hidden></div>
         </div>
 
@@ -116,7 +128,7 @@
         <summary>这是什么？怎么用？</summary>
         <div class="about-body">
           <p><b>拆分</b>：选择任意文件，设置 k 和 n，点「拆分」。得到 1 个密文 + n 个分片。密文随便放（网盘/U 盘/公共存储），n 个分片交给 n 个人（或自己多处保管）。</p>
-          <p><b>恢复</b>：任意 k 个人交出各自的分片，加上那个密文，凑在一起点「恢复」。任何人单独持有少于 k 个分片，都推不出任何信息。</p>
+          <p><b>恢复</b>：先选密文（会提示需要几片），再交出任意 k 片分片，点「恢复」。任何人单独持有少于 k 个分片，都推不出任何信息。</p>
           <p><b>原理</b>：随机生成 32 字节 key，用 AES-256-GCM 加密文件；Shamir 秘密共享（GF(2⁸)）把 key 拆成 k-of-n。所以分片极小，文件本身不分片。</p>
           <p><b>隐私</b>：整页单文件、无后端、无统计，可另存到本地断网使用。唯一例外是勾选了 OpenTimestamps 存证（会把文件哈希发给公共日历）和点击「在线验证」（会向区块数据源查询）。</p>
           <p>源码：<a href="https://github.com/tdstud1o/tool/tree/main/shamir" target="_blank" rel="noopener">tdstud1o/tool · shamir</a></p>

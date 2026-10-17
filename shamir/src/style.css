@@ -71,7 +71,7 @@ body {
 .wrap {
   max-width: 680px;
   margin: 0 auto;
-  padding: 2rem 1rem 3rem;
+  padding: clamp(1rem, 3vw, 2rem) clamp(0.7rem, 2.5vw, 1rem) 3rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -85,12 +85,7 @@ body {
   border-radius: var(--radius);
   border: 1px solid var(--card-border);
   box-shadow: var(--shadow-card);
-  padding: 1.5rem 1.9rem;
-}
-
-@media (max-width: 600px) {
-  .wrap { padding: 1rem 0.7rem 2rem; }
-  .card { padding: 1.1rem 1.15rem; }
+  padding: clamp(1.1rem, 3.5vw, 1.9rem);
 }
 
 /* ===== 头卡 ===== */
@@ -181,8 +176,12 @@ h2:first-child { margin-top: 0; }
   background: var(--entry);
 }
 
-.kn-row { display: flex; gap: 1rem; }
-.kn-row label { flex: 1; font-size: 0.86rem; color: var(--secondary); }
+.kn-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.8rem;
+}
+.kn-row label { min-width: 0; font-size: 0.86rem; color: var(--secondary); }
 .kn-row input {
   display: block;
   width: 100%;
@@ -271,6 +270,7 @@ textarea:focus { outline: none; border-color: var(--primary); }
   display: flex;
   align-items: center;
   gap: 0.7rem;
+  flex-wrap: wrap;
   padding: 0.6rem 0.9rem;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -290,7 +290,7 @@ textarea:focus { outline: none; border-color: var(--primary); }
 }
 :root[data-theme="dark"] .share-idx { color: #1d1e20; }
 .share-text {
-  flex: 1;
+  flex: 1 1 12rem;
   min-width: 0;
   font-family: var(--mono);
   font-size: 0.72rem;
@@ -347,6 +347,102 @@ textarea:focus { outline: none; border-color: var(--primary); }
 .msg-error { background: rgba(220, 38, 38, 0.1); color: var(--err); }
 .msg-warn { background: rgba(180, 83, 9, 0.1); color: var(--warn); }
 .hint { font-size: 0.8rem; color: var(--secondary); margin: 0.4rem 0 0; }
+
+/* ===== 命名选项（拆分后可见）===== */
+.naming {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.8rem;
+}
+.naming-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.86rem;
+  color: var(--secondary);
+  white-space: nowrap;
+}
+.naming select,
+.naming input {
+  padding: 0.45rem 0.7rem;
+  font-size: 0.88rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--entry);
+  color: var(--text);
+}
+.naming input {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+.naming select:focus,
+.naming input:focus { outline: none; border-color: var(--primary); }
+
+/* ===== 进度条 + 运行日志 ===== */
+.prog {
+  height: 8px;
+  margin-top: 0.9rem;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.prog-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: var(--primary-grad);
+  transition: width 0.3s ease;
+}
+.prog.indet .prog-bar {
+  width: 35%;
+  transition: none;
+  animation: prog-indet 1.1s ease-in-out infinite;
+}
+@keyframes prog-indet {
+  from { margin-left: -35%; }
+  to { margin-left: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prog.indet .prog-bar { animation: none; margin-left: 30%; }
+}
+
+.run-log {
+  margin-top: 0.7rem;
+  max-height: 9rem;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.7;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--entry);
+  color: var(--secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.run-log .lg-ok { color: var(--ok); }
+.run-log .lg-err { color: var(--err); }
+
+/* 密文信息提示（恢复流程第①步） */
+.ct-info {
+  margin-top: 0.7rem;
+  padding: 0.7rem 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--entry);
+  font-size: 0.86rem;
+}
+.ct-info b { color: var(--primary); }
+
+/* 忙碌时禁用交互（进度条/日志保持可滚动） */
+.drop.is-disabled,
+.file-label.is-disabled {
+  pointer-events: none;
+  opacity: 0.55;
+}
 
 /* ===== 关于 & 页脚 ===== */
 .about { padding: 1rem 1.5rem; }
