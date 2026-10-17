@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="任意文件 → n 个分片 + 1 个密文；凑齐任意 k 片 → 原文件回来。全程浏览器本地计算。" />
+    <title>Shamir 文件分片 · 点击即用</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='0'%3E%3Cstop offset='0' stop-color='%232563eb'/%3E%3Cstop offset='1' stop-color='%237c3aed'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='3' y='3' width='26' height='26' rx='7' fill='url(%23g)'/%3E%3Cpath d='M16 9v6l4 4' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' fill='none'/%3E%3C/svg%3E" />
+    <script>
+      // 主题：auto/light/dark，内联在 head 防闪白
+      try {
+        var t = localStorage.getItem('shamir-theme') || 'auto'
+        var dark = matchMedia('(prefers-color-scheme: dark)').matches
+        document.documentElement.dataset.theme = t === 'auto' ? (dark ? 'dark' : 'light') : t
+      } catch (e) {
+        document.documentElement.dataset.theme = 'light'
+      }
+    </script>
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="card hero">
+        <h1 class="hero-title">Shamir 文件分片</h1>
+        <p class="hero-sub">任意文件 → n 个分片 + 1 个密文；凑齐任意 k 片 → 原文件回来。<br />全程浏览器本地计算，不发送、不存储任何数据。</p>
+        <div class="hero-badges">
+          <span class="badge">AES-256-GCM</span>
+          <span class="badge">k-of-n Shamir</span>
+          <span class="badge">零上传</span>
+        </div>
+        <button id="themeToggle" class="theme-toggle" title="切换主题">🌗</button>
+      </header>
+
+      <nav class="card tabs" aria-label="模式切换">
+        <button class="tab is-active" data-view="split" type="button">拆分</button>
+        <button class="tab" data-view="restore" type="button">恢复</button>
+      </nav>
+
+      <!-- ============ 拆分 ============ -->
+      <section id="view-split" class="view">
+        <div class="card">
+          <h2>① 选择文件</h2>
+          <div id="dropSplit" class="drop" tabindex="0">
+            <span id="dropSplitText">拖文件到这里，或点击选择</span>
+          </div>
+          <input id="fileSplit" type="file" hidden />
+
+          <h2>② 设置 k / n</h2>
+          <div class="kn-row">
+            <label>阈值 k（恢复所需最少片数）<input id="inK" type="number" min="2" max="255" value="3" /></label>
+            <label>总片数 n（分给几个人）<input id="inN" type="number" min="2" max="255" value="5" /></label>
+          </div>
+          <p class="hint">每人只需保管一片（几十字节）；密文可随便丢网盘，没有 k 片它毫无意义。</p>
+
+          <label class="ots-opt">
+            <input id="otsCheck" type="checkbox" />
+            <span>同时把文件哈希提交到 <b>OpenTimestamps</b> 存证（<b>需要联网</b>，回执藏进密文；其余操作仍全程本地）</span>
+          </label>
+
+          <button id="btnSplit" class="btn btn-primary" type="button" disabled>拆分</button>
+          <div id="splitError" class="msg msg-error" hidden></div>
+          <div id="splitWarn" class="msg msg-warn" hidden></div>
+        </div>
+
+        <div id="resultCard" class="card" hidden>
+          <h2>③ 保存产物</h2>
+          <div class="prod-head">
+            <div class="prod ct-prod">
+              <div class="prod-name" id="ctName">…</div>
+              <div class="prod-meta" id="ctMeta"></div>
+              <button class="btn btn-ghost" id="btnDlCt" type="button">下载密文</button>
+            </div>
+          </div>
+          <div id="otsBox" class="ots-box" hidden></div>
+          <div class="prod-head"><div class="prod-title">分片（每人一片，注意编号）</div></div>
+          <div id="shareList" class="share-list"></div>
+          <button class="btn btn-ghost" id="btnDlAll" type="button">下载全部（密文 + 分片）</button>
+        </div>
+      </section>
+
+      <!-- ============ 恢复 ============ -->
+      <section id="view-restore" class="view" hidden>
+        <div class="card">
+          <h2>① 导入分片（至少 k 片）</h2>
+          <textarea id="shareText" rows="5" spellcheck="false" placeholder="把分片文本贴进来，每行一条：SHAMIR1:k:n:base64…"></textarea>
+          <label class="btn btn-ghost file-label">从文件导入分片
+            <input id="shareFiles" type="file" multiple accept=".txt,.share,.shares,text/plain" hidden />
+          </label>
+          <div id="shareStatus" class="hint"></div>
+
+          <h2>② 选择密文文件</h2>
+          <div id="dropCt" class="drop" tabindex="0">
+            <span id="dropCtText">拖密文（.smcf）到这里，或点击选择</span>
+          </div>
+          <input id="fileCt" type="file" accept=".smcf,application/octet-stream" hidden />
+
+          <button id="btnRestore" class="btn btn-primary" type="button" disabled>恢复文件</button>
+          <div id="restoreError" class="msg msg-error" hidden></div>
+        </div>
+
+        <div id="restoreCard" class="card" hidden>
+          <h2>③ 下载原文件</h2>
+          <div class="restore-ok">
+            <div class="ok-mark">✓</div>
+            <div>
+              <div class="prod-name" id="restName"></div>
+              <div class="prod-meta" id="restMeta"></div>
+            </div>
+          </div>
+          <div id="hashLine" class="hash-line"></div>
+          <div id="otsRestBox" class="ots-box" hidden></div>
+          <button class="btn btn-primary" id="btnDlRest" type="button">下载原文件</button>
+        </div>
+      </section>
+
+      <details class="card about">
+        <summary>这是什么？怎么用？</summary>
+        <div class="about-body">
+          <p><b>拆分</b>：选择任意文件，设置 k 和 n，点「拆分」。得到 1 个密文 + n 个分片。密文随便放（网盘/U 盘/公共存储），n 个分片交给 n 个人（或自己多处保管）。</p>
+          <p><b>恢复</b>：任意 k 个人交出各自的分片，加上那个密文，凑在一起点「恢复」。任何人单独持有少于 k 个分片，都推不出任何信息。</p>
+          <p><b>原理</b>：随机生成 32 字节 key，用 AES-256-GCM 加密文件；Shamir 秘密共享（GF(2⁸)）把 key 拆成 k-of-n。所以分片极小，文件本身不分片。</p>
+          <p><b>隐私</b>：整页单文件、无后端、无统计，可另存到本地断网使用。唯一例外是勾选了 OpenTimestamps 存证（会把文件哈希发给公共日历）和点击「在线验证」（会向区块数据源查询）。</p>
+          <p>源码：<a href="https://github.com/tdstud1o/tool/tree/main/shamir" target="_blank" rel="noopener">tdstud1o/tool · shamir</a></p>
+        </div>
+      </details>
+
+      <footer class="foot">Shamir · 点击即用 · tdstud1o/tool</footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -33,19 +33,43 @@
 
 ## 数据格式（v1 草案）
 
-**密文文件**：`SMCF1` magic(5B) + version(1B) + n(1B) + k(1B) + IV(12B) + ciphertext(AES-256-GCM)。分片可独立于密文校验 n/k。
-
-**分片文本**：
+两层同款 TLV 容器（PNG/age 风格，支持向前扩展）：
 
 ```
-SHAMIR1:3:5:A9fK...base64...
-   │     │ │   └─ GF(2⁸) 分片 payload（含 index）
-   │     │ └─ n 总片数
-   │     └─ k 阈值
-   └─ 格式版本
+TLV 通用结构：magic(4B) + version(1B) + tag(1B) + len(4B 大端) + value 序列
+兼容规则：解析器必须跳过未知 tag；约定 lastTag 的块必须放最后；单值上限 4 GiB
 ```
 
-恢复时：k 片 combine → 32B key → AES-GCM 解密 → magic 对不上即报"分片/密文不匹配"。
+**内层 SMPK 载荷包**（先打包、再整体加密——元数据、存证、签名全部藏进密文）：
+
+```
+SMPK v1：
+  0x01 FILENAME    utf-8 原文件名
+  0x04 CREATED_AT  u64 毫秒（原文件创建/拆分时间，属于元数据，不外露）
+  0x05 MIME        utf-8
+  0x06 NOTE        utf-8 备注
+  0x07 SHA256      原始 DATA 的 SHA-256（32B）
+  0x12 OTS_RECEIPT OpenTimestamps .ots 回执原文（用户勾选才提交哈希）
+  0x11 DATA        原始数据（最后一个块）
+```
+
+**外层 SMCF 密文文件**（AES-256-GCM(key, SMPK 包)；tag 编号 = 物理布局顺序，顺序可读）：
+
+```
+SMCF v1：
+  0x01 FILENAME    展示用文件名
+  0x02 K / 0x03 N  分片参数，无密钥可读，凑片前先交叉校验
+  0x04 IV          12B
+  0x05 CIPHERTEXT  密文（必须，最后一个块）
+```
+
+**分片 = 纯密钥材料**（保持最少存储）：`SHAMIR1:k:n:base64(GF(2⁸) payload)`，
+payload 首字节为 x 坐标 index；每片自带 k/n 可独立校验，同一批片不一致立即报错。
+分片不含任何元数据——OTS、签名、文件名都只活在密文里。
+
+恢复时：k 片 combine → 32B key → 解开 SMCF → AES-GCM 认证失败即报
+"分片/密文不匹配" → 解出 SMPK → SHA-256 校验 DATA → 原文件。
+若内层含 OTS_RECEIPT：离线比对回执摘要与 DATA 哈希；可选在线完整验证（拉区块头对 merkle root）。
 
 ## 里程碑
 

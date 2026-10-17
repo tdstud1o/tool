@@ -1,0 +1,101 @@
+// 通用 TLV 容器（PNG/age 风格，支持向前扩展），SMCF 外层密文与 SMPK 内层载荷包共用
+//
+//   magic(nB) + version(1B) + TLV 序列：tag(1B) + len(4B 大端) + value
+//
+// 兼容规则：解析器必须跳过未知 tag；约定 lastTag 的块必须放最后；单值上限 4 GiB。
+
+import { cat } from './b64.ts'
+
+export interface Chunk {
+  tag: number
+  value: Uint8Array
+}
+
+export interface TlvFile {
+  version: number
+  chunks: Map<number, Uint8Array>
+}
+
+export function tlvBuild(
+  magic: string,
+  version: number,
+  chunks: Chunk[],
+  opts: { lastTag?: number } = {},
+): Uint8Array {
+  const last = opts.lastTag != null ? chunks.filter((c) => c.tag === opts.lastTag) : []
+  const rest = chunks
+    .filter((c) => c.tag !== opts.lastTag)
+    .sort((a, b) => a.tag - b.tag)
+  const magicBytes = new TextEncoder().encode(magic)
+  const parts: Uint8Array[] = [magicBytes, new Uint8Array([version])]
+  for (const c of [...rest, ...last]) {
+    if (c.value.length > 0xffff_ffff) throw new Error('TLV 块超过 4GiB 上限')
+    const len = new Uint8Array(4)
+    new DataView(len.buffer).setUint32(0, c.value.length, false)
+    parts.push(new Uint8Array([c.tag]), len, c.value)
+  }
+  return cat(...parts)
+}
+
+export function tlvParse(magic: string, b: Uint8Array): TlvFile {
+  const magicBytes = new TextEncoder().encode(magic)
+  if (b.length < magicBytes.length + 1 || magicBytes.some((m, i) => b[i] !== m))
+    throw new Error(`文件头不匹配（期望 ${magic}）`)
+  const version = b[magicBytes.length]!
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength)
+  const chunks = new Map<number, Uint8Array>()
+  let off = magicBytes.length + 1
+  while (off + 5 <= b.length) {
+    const tag = b[off]!
+    const len = dv.getUint32(off + 1, false)
+    if (off + 5 + len > b.length) throw new Error('TLV 块长度越界，文件已损坏')
+    // 同 tag 重复时后者覆盖（向前兼容：允许新版本升级旧值）
+    chunks.set(tag, b.slice(off + 5, off + 5 + len))
+    off += 5 + len
+  }
+  return { version, chunks }
+}
+
+// ===== 外层：SMCF 密文容器 =====
+// 外层 tag 编号 = 物理布局顺序（顺序读取无需跳转）：K → N → IV → CIPHERTEXT
+
+export const SMCF = {
+  MAGIC: 'SMCF',
+  VERSION: 1,
+  TAG: {
+    FILENAME: 0x01, // utf-8，展示用（真实元数据在内层）
+    K: 0x02, // 1B 阈值（无密钥可读，用于与分片交叉校验）
+    N: 0x03, // 1B 总片数
+    IV: 0x04, // 12B
+    CIPHERTEXT: 0x05, // AES-256-GCM(key, SMPK 包)，必须，最后一个块
+  },
+  LAST_TAG: 0x05,
+} as const
+
+// ===== 内层：SMPK 载荷包（解密后才能读到，承载原数据 + 元数据 + 存证/签名）=====
+
+export const SMPK = {
+  MAGIC: 'SMPK',
+  VERSION: 1,
+  TAG: {
+    FILENAME: 0x01, // utf-8 原文件名
+    CREATED_AT: 0x04, // u64 毫秒，原文件创建/拆分时间
+    MIME: 0x05, // utf-8
+    NOTE: 0x06, // utf-8 备注
+    SHA256: 0x07, // 原始 DATA 的 SHA-256（32B）
+    DATA: 0x11, // 原始数据，约定最后一个块
+    OTS_RECEIPT: 0x12, // OpenTimestamps .ots 回执原文
+    // 未来扩展（签名、KDF 等）直接加新 tag，旧版解析器自动跳过
+  },
+  LAST_TAG: 0x11,
+} as const
+
+export function u64beBytes(n: number): Uint8Array {
+  const out = new Uint8Array(8)
+  new DataView(out.buffer).setBigUint64(0, BigInt(n), false)
+  return out
+}
+
+export function beBytesToU64(b: Uint8Array): number {
+  return Number(new DataView(b.buffer, b.byteOffset, b.byteLength).getBigUint64(0, false))
+}
