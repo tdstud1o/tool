@@ -28,9 +28,14 @@ jobs:
         working-directory: shamir
       - run: npx tsc --noEmit && npm run build
         working-directory: shamir
+      # 站点结构：<root>/index.html（工具箱落地页）+ <root>/shamir/（本工具）
+      - run: |
+          mkdir -p _pages/shamir
+          cp index.html _pages/
+          cp -r shamir/dist/* _pages/shamir/
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: shamir/dist
+          path: _pages
 
   deploy:
     needs: build
