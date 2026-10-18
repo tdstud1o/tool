@@ -1,21 +1,21 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; worker-src blob: data:; style-src 'unsafe-inline'; img-src data: blob:; connect-src https://a.pool.opentimestamps.org https://*.opentimestamps.org https://mempool.space data: blob:" />
     <meta name="description" content="任意文件 → n 个分片 + 1 个密文；凑齐任意 k 片 → 原文件回来。全程浏览器本地计算。" />
-    <title>Shamir 文件分片 · 点击即用</title>
+    <title>Shamir 文件分片</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='0'%3E%3Cstop offset='0' stop-color='%232563eb'/%3E%3Cstop offset='1' stop-color='%237c3aed'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='3' y='3' width='26' height='26' rx='7' fill='url(%23g)'/%3E%3Cpath d='M16 9v6l4 4' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' fill='none'/%3E%3C/svg%3E" />
     <script>
-      // 主题：auto/light/dark，内联在 head 防闪白
+      // 主题：默认暗色（首访不跟随系统，避免先白屏再变暗的闪烁）；
+      // 用户点过切换按钮后才按 localStorage 里存的偏好走。内联在 head 里同步执行防灾闪。
       try {
-        var t = localStorage.getItem('shamir-theme') || 'auto'
-        var dark = matchMedia('(prefers-color-scheme: dark)').matches
-        document.documentElement.dataset.theme = t === 'auto' ? (dark ? 'dark' : 'light') : t
+        var t = localStorage.getItem('shamir-theme')
+        document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark'
       } catch (e) {
-        document.documentElement.dataset.theme = 'light'
+        document.documentElement.dataset.theme = 'dark'
       }
     </script>
   </head>
@@ -40,57 +40,68 @@
       <!-- ============ 拆分 ============ -->
       <section id="view-split" class="view">
         <div class="card">
-          <h2>① 选择文件（一个文件 = 一层，越往后需要越多分片）</h2>
+          <h2>选择文件</h2>
           <div id="dropSplit" class="drop" tabindex="0">
             <span id="dropSplitText">拖文件到这里，或点击选择（可多选）</span>
           </div>
           <div id="nRow" class="n-row" hidden>
-            <label for="nShares">整套分片份数 n</label>
+            <label for="nShares">需要分发给几个人：</label>
             <input id="nShares" type="number" min="2" max="16777215" value="5" />
-            <span class="n-note">所有层共用，只在这里设一次</span>
           </div>
           <div id="levelList" class="level-list" hidden></div>
           <div id="levelMore" class="level-more" hidden>
-            <button id="btnAddMore" class="btn btn-ghost" type="button">加入更多文件</button>
-            <button id="btnAddFake" class="btn btn-ghost btn-fake" type="button">加入假文件</button>
+            <div class="add-bar">
+              <button id="btnAddMore" class="add-seg add-seg-more" type="button">拖文件到这里，或点击选择（可多选）</button>
+              <button id="btnAddFake" class="add-seg add-seg-fake" type="button">加入假文件</button>
+            </div>
           </div>
 
           <div id="fakeBox" class="fake-box" hidden>
             <div class="fake-head">
               <span class="fake-title">假文件层（只能一层，必定最后）</span>
-              <label class="fake-align">密钥串对齐到
-                <select id="fakeAlign">
-                  <option value="32">32 组</option>
-                  <option value="256">256 组</option>
-                  <option value="custom">自定义…</option>
-                </select>
-              </label>
-              <input id="fakeCount" class="fake-count" type="number" min="2" max="4096" value="32" hidden />
               <button id="btnApplyFake" class="btn btn-ghost" type="button">重算默认值</button>
             </div>
-            <div id="fakeWarn" class="hint lg-warn" hidden></div>
             <div id="fakeList" class="fake-list"></div>
-            <div id="fakeSummary" class="fake-summary"></div>
           </div>
 
-          <p id="levelHint" class="hint" hidden>
-            每行单独设 k；<b>n 是整套分片的份数，改一次全部生效</b>。第 2 层起必须先解开前一层才能看到下一层密文。
-            只有 1 层时 n 会写进密文；多层密文里不写 n（恢复端只能看到你实际导入的片数）。
-          </p>
-
-          <h2>② 压缩（写在密文内，恢复时自动识别）</h2>
-          <div class="seg" id="zipSeg" role="radiogroup" aria-label="压缩算法">
-            <button type="button" data-algo="0">不压缩</button>
-            <button type="button" data-algo="1" class="is-active">zstd L3</button>
-            <button type="button" data-algo="2">gzip</button>
-            <button type="button" data-algo="3">zstd L19</button>
-          </div>
-          <p class="hint" id="zipHint">默认 zstd L3：文本/代码约省一半，速度近百 MB/s。已压缩的文件（jpg/zip/mp4）收益低于 1% 会自动跳过；L19 更小但慢 40 倍。</p>
-
-          <label class="ots-opt">
-            <input id="otsCheck" type="checkbox" />
-            <span>同时把文件哈希提交到 <b>OpenTimestamps</b> 存证（<b>需要联网</b>，回执藏进密文；其余操作仍全程本地）</span>
-          </label>
+          <details class="adv">
+            <summary>高级操作</summary>
+            <div class="adv-body">
+              <div class="adv-item">
+                <label class="align-opt">
+                  <input id="alignCheck" type="checkbox" />
+                  <span><b>密钥串对齐</b>：每一片都写满固定组数的密钥材料，多出来的组没有密文，让人看不出里面有几层（2 层起强制启用）。</span>
+                </label>
+                <div id="alignOpts" hidden>
+                  <div class="align-row">
+                    <label class="fake-align">对齐到
+                      <select id="fakeAlign">
+                        <option value="32">32 组</option>
+                        <option value="256">256 组</option>
+                        <option value="custom">自定义…</option>
+                      </select>
+                    </label>
+                    <input id="fakeCount" class="fake-count" type="number" min="2" max="4096" value="32" hidden />
+                  </div>
+                  <div id="fakeWarn" class="hint lg-warn" hidden></div>
+                  <div id="fakeSummary" class="fake-summary"></div>
+                </div>
+              </div>
+              <div class="adv-item">
+                <div class="adv-label">压缩（写在密文内，恢复时自动识别）</div>
+                <div class="seg" id="zipSeg" role="radiogroup" aria-label="压缩算法">
+                  <button type="button" data-algo="0">不压缩</button>
+                  <button type="button" data-algo="1" class="is-active">zstd L3</button>
+                  <button type="button" data-algo="2">gzip</button>
+                  <button type="button" data-algo="3">zstd L19</button>
+                </div>
+              </div>
+              <label class="ots-opt">
+                <input id="otsCheck" type="checkbox" />
+                <span>同时把文件哈希提交到 <b>OpenTimestamps</b> 存证（<b>需要联网</b>，回执藏进密文；其余操作仍全程本地）</span>
+              </label>
+            </div>
+          </details>
 
           <button id="btnSplit" class="btn btn-primary" type="button" disabled>拆分</button>
           <div id="runProg" class="prog" hidden><div class="prog-bar"></div></div>
@@ -98,25 +109,30 @@
         </div>
 
         <div id="resultCard" class="card" hidden>
-          <h2>④ 保存产物</h2>
-          <div class="naming">
-            <div class="seg" id="nameSeg" role="radiogroup" aria-label="产物命名">
-              <button type="button" data-name="date">YYYYMMDD-文件名</button>
-              <button type="button" data-name="name" class="is-active">文件名</button>
-              <button type="button" data-name="uuid">UUID</button>
-              <button type="button" data-name="custom">自定义</button>
-            </div>
-            <input id="nameCustom" type="text" placeholder="自定义文件名（扩展名 .tscf 自动加）" hidden />
-          </div>
+          <h2>保存产物</h2>
           <div class="prod">
             <div class="prod-name" id="ctName">…</div>
             <div class="prod-meta" id="ctMeta"></div>
             <button class="btn btn-ghost" id="btnDlCt" type="button">下载密文</button>
           </div>
           <div id="otsBox" class="ots-box" hidden></div>
-          <div class="prod-title">分片（每人一片，注意编号）</div>
+          <div class="prod-title">分片（每人一片）</div>
           <div id="shareList" class="share-list"></div>
           <button class="btn btn-ghost" id="btnDlAll" type="button">下载全部（密文 + 分片）</button>
+          <details class="adv">
+            <summary>高级操作</summary>
+            <div class="adv-body">
+              <div class="naming">
+                <div class="seg" id="nameSeg" role="radiogroup" aria-label="产物命名">
+                  <button type="button" data-name="date">YYYYMMDD-文件名</button>
+                  <button type="button" data-name="name" class="is-active">文件名</button>
+                  <button type="button" data-name="uuid">UUID</button>
+                  <button type="button" data-name="custom">自定义</button>
+                </div>
+                <input id="nameCustom" type="text" placeholder="自定义文件名（扩展名 .tscf 自动加）" hidden />
+              </div>
+            </div>
+          </details>
         </div>
       </section>
 
@@ -159,7 +175,7 @@
         <div class="about-body">
           <p><b>拆分</b>：选择一个或多个文件（每个文件 = 一层），给每层设 k，选对齐层数，点「拆分」。得到 1 个密文 + n 个分片。密文随便放（网盘/U 盘/公共存储），n 个分片交给 n 个人（或自己多处保管）。</p>
           <p><b>多层</b>：第 1 层是门槛最低的文件，第 2、3… 层套在它里面，需要更多片才能继续往下解。凑够第 1 层的 k 片只能拿到第 1 层；多凑几片才轮到第 2 层。</p>
-          <p><b>假文件</b>：只能加一层，且必定是最后一层。它长得和真文件一模一样，但拆分时"分片共享的密钥"和"加密用的密钥"不是同一把——所以就算凑够它标注的 k 片，插出来的密钥也打不开它，只能得到解密失败。它的 k 可以设到 n 以上（那样连凑都凑不齐）。同时密钥串会被补到 32（或 256）组：多出来的诱饵组没有对应密文，只是让人看不出里面到底套了几层。</p>
+          <p><b>假文件</b>：只能加一层，且必定是最后一层。它长得和真文件一模一样，但拆分时"分片共享的密钥"和"加密用的密钥"不是同一把——所以就算凑够它标注的 k 片，插出来的密钥也打不开它，只能得到解密失败。它的 k 可以设到 n 以上（那样连凑都凑不齐）。同时密钥串会被补到 32（或 256）组：多出来的假密钥组没有对应密文，只是让人看不出里面到底套了几层。</p>
           <p><b>恢复</b>：先选密文（会提示需要几片），再交出分片，点「恢复」。够哪一层的 k 就解到哪一层，不够的层会显示还差几片。</p>
           <p><b>原理</b>：每一层各生成一个 32 字节随机 key，用 AES-256-GCM 加密该层明文；Shamir 秘密共享（secp256k1 基域 GF(p)，p = 2²⁵⁶−2³²−977）把每层的 key 拆成 k-of-n，所有层共用同一套坐标。所以分片极小，文件本身不分片。</p>
           <p><b>隐私</b>：整页单文件、无后端、无统计，可另存到本地断网使用。唯一例外是勾选了 OpenTimestamps 存证（会把文件哈希发给公共日历）和点击「在线验证」（会向区块数据源查询）。</p>
@@ -167,7 +183,7 @@
         </div>
       </details>
 
-      <footer class="foot">Shamir · 点击即用 · tdstud1o/tool</footer>
+      <footer class="foot">Shamir · tdstud1o/tool</footer>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

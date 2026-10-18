@@ -20,6 +20,7 @@
   --shadow-hover: 0 6px 18px rgba(79, 70, 229, 0.18);
   --radius: 16px;
   --mono: ui-monospace, "Cascadia Mono", Consolas, "JetBrains Mono", monospace;
+  color-scheme: light;
 }
 
 :root[data-theme="dark"] {
@@ -36,6 +37,7 @@
   --warn: #fbbf24;
   --shadow-card: 0 8px 28px rgba(0, 0, 0, 0.5);
   --shadow-hover: 0 6px 18px rgba(129, 140, 248, 0.22);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -173,11 +175,6 @@ h2:first-child { margin-top: 0; }
   border-color: var(--primary);
   color: var(--primary);
 }
-.drop.has-file {
-  border-style: solid;
-  color: var(--text);
-  background: var(--entry);
-}
 
 .kn-row {
   display: grid;
@@ -271,15 +268,40 @@ h2:first-child { margin-top: 0; }
 .lv-del { margin-left: auto; padding: 0.2rem 0.55rem; font-size: 0.9rem; }
 
 /* 「加入更多文件 85% / 加入假文件 15%」 */
-.level-more { display: grid; grid-template-columns: 85fr 15fr; gap: 0.5rem; margin-top: 0.7rem; }
-.level-more .btn {
+.level-more { margin-top: 0.7rem; }
+
+/* 一条看起来是一个整体的分半按钮：左半继续拖/选文件，右半加假层。
+   hover 只点亮悬停的那一半；中间一条 1px 分割线制造"同一个按钮"的错觉 */
+.add-bar {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--entry);
+}
+.add-seg {
+  flex: 1 1 0;
+  min-width: 0;
   margin: 0;
-  padding: 0.55rem 0.4rem;
+  padding: 0.62rem 0.9rem;
+  border: 0;
+  background: transparent;
+  color: var(--secondary);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: background 0.15s ease, color 0.15s ease;
 }
-.btn-fake { color: var(--secondary); border-style: dashed; }
+.add-seg + .add-seg { border-left: 1px solid var(--border); }
+.add-seg:hover:not(:disabled) { background: rgba(79, 70, 229, 0.12); color: var(--primary); }
+:root[data-theme="dark"] .add-seg:hover:not(:disabled) { background: rgba(129, 140, 248, 0.16); }
+.add-seg:disabled { cursor: default; opacity: 0.5; }
+.add-seg.is-drag { background: rgba(79, 70, 229, 0.12); color: var(--primary); }
+:root[data-theme="dark"] .add-seg.is-drag { background: rgba(129, 140, 248, 0.16); }
+.add-seg-fake { flex: 0 0 auto; }
 
 .fake-box {
   margin-top: 0.9rem;
@@ -339,6 +361,74 @@ h2:first-child { margin-top: 0; }
   color: var(--primary);
   font-variant-numeric: tabular-nums;
 }
+
+/* ===== 高级操作折叠框（默认收起，免得把联网选项摆在主路径上） ===== */
+.adv {
+  margin: 1rem 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--entry);
+}
+.adv > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.58rem 0.9rem;
+  font-size: 0.85rem;
+  color: var(--secondary);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.adv > summary::-webkit-details-marker { display: none; }
+.adv > summary::before {
+  content: "▸";
+  font-size: 0.72rem;
+  transition: transform 0.15s ease;
+}
+.adv[open] > summary::before { transform: rotate(90deg); }
+.adv > summary:hover { color: var(--text); }
+/* 收起状态下也能看出里面的开关是不是开着，避免"悄悄联网"的观感 */
+.adv:has(#otsCheck:checked) > summary::after {
+  content: "OTS 存证已启用";
+  margin-left: auto;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.72rem;
+  color: var(--primary);
+  background: rgba(79, 70, 229, 0.1);
+}
+.adv-body {
+  padding: 0 0.9rem;
+  border-top: 1px dashed var(--border);
+}
+.adv-item { padding: 0.8rem 0 0.2rem; }
+.adv-item + .ots-opt { padding-top: 0.4rem; }
+.adv-label {
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.adv .ots-opt { margin: 0.8rem 0; }
+
+/* 密钥串对齐（高级操作里的唯一权威设置处） */
+.align-opt {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  font-size: 0.85rem;
+  color: var(--secondary);
+  cursor: pointer;
+}
+.align-opt input { margin-top: 0.28rem; accent-color: var(--primary); }
+.align-opt input:disabled { cursor: default; }
+#alignOpts { margin-top: 0.55rem; padding-left: 1.35rem; }
+.align-row { display: flex; align-items: center; gap: 0.6rem; }
+.align-row .fake-align { font-size: 0.85rem; color: var(--secondary); }
+#alignOpts .fake-summary { margin: 0.5rem 0 0.2rem; }
+#alignOpts .lg-warn { margin: 0.5rem 0 0; }
 
 .ots-opt {
   display: flex;
@@ -525,7 +615,7 @@ textarea:focus { outline: none; border-color: var(--primary); }
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
-  margin-bottom: 0.8rem;
+  padding: 0.8rem 0;
 }
 .seg {
   display: flex;

@@ -12,7 +12,7 @@ import {
   sameLevels,
   type ShareEntry,
 } from './core/format.ts'
-import { FAKE_NAME, fakeK, padKs, randSize, sizeStats, type LevelPlan } from './core/levels.ts'
+import { fakeK, padKs, randSize, sizeStats, type LevelPlan } from './core/levels.ts'
 import {
   OtsNoCorsError,
   calendarHasCors,
@@ -224,6 +224,8 @@ let nShares = 5
 let sealed = false
 let fakeAlign: '32' | '256' | 'custom' = '32'
 let fakeCustom = 32
+/** 密钥串对齐开关：勾上后每片补齐固定组数（多出来的组没有密文） */
+let alignEnabled = false
 /** 假层的 k 被用户手改过之后，就不再跟随真实层的规律 */
 let fakeKDirty = false
 
@@ -242,6 +244,8 @@ function clampK(v: number, cap: number): number {
 function setNShares(v: number): void {
   const nc = Math.min(MAX_SHARES, Math.max(2, Math.round(v) || 2))
   nShares = nc
+  // k 抬升会拉 n：全局输入框要跟着显示新值
+  nSharesInput.value = String(nc)
   for (const [lv, inp] of kInputs) {
     if (lv.kind === 'fake') continue // 假层可以 k > n
     inp.max = String(nc)
@@ -269,32 +273,33 @@ nSharesInput.addEventListener('input', () => {
 })
 nSharesInput.addEventListener('blur', () => { nSharesInput.value = String(nShares) })
 
-function bindDrop(dropId: string, multiple: boolean, onFiles: (files: File[]) => void): HTMLInputElement {
-  const drop = $(dropId)
+function bindDrop(hosts: HTMLElement[], multiple: boolean, onFiles: (files: File[]) => void): HTMLInputElement {
   const input = document.createElement('input')
   input.type = 'file'
   input.hidden = true
   input.multiple = multiple
-  drop.addEventListener('click', () => { if (!drop.classList.contains('is-disabled')) input.click() })
-  drop.addEventListener('keydown', (e) => e.key === 'Enter' && !drop.classList.contains('is-disabled') && input.click())
   input.addEventListener('change', () => {
     if (input.files!.length) onFiles(Array.from(input.files!))
     input.value = ''
   })
-  for (const ev of ['dragover', 'dragenter'] as const)
-    drop.addEventListener(ev, (e) => {
+  for (const host of hosts) {
+    host.addEventListener('click', () => { if (!host.classList.contains('is-disabled')) input.click() })
+    host.addEventListener('keydown', (e) => e.key === 'Enter' && !host.classList.contains('is-disabled') && input.click())
+    for (const ev of ['dragover', 'dragenter'] as const)
+      host.addEventListener(ev, (e) => {
+        e.preventDefault()
+        host.classList.add('is-drag')
+      })
+    for (const ev of ['dragleave', 'drop'] as const)
+      host.addEventListener(ev, () => host.classList.remove('is-drag'))
+    host.addEventListener('drop', (e) => {
       e.preventDefault()
-      drop.classList.add('is-drag')
+      if (host.classList.contains('is-disabled')) return
+      const files = Array.from(e.dataTransfer?.files ?? [])
+      if (files.length) onFiles(files)
     })
-  for (const ev of ['dragleave', 'drop'] as const)
-    drop.addEventListener(ev, () => drop.classList.remove('is-drag'))
-  drop.addEventListener('drop', (e) => {
-    e.preventDefault()
-    if (drop.classList.contains('is-disabled')) return
-    const files = Array.from(e.dataTransfer?.files ?? [])
-    if (files.length) onFiles(files)
-  })
-  drop.after(input)
+  }
+  hosts[0]!.after(input)
   return input
 }
 
@@ -305,21 +310,55 @@ function addRealFiles(files: File[]): void {
     // 也让假文件能顺着这个等差规律往下接
     const prev = levels.length ? levels[levels.length - 1]!.k : Math.min(3, nShares)
     const k = clampK(levels.length ? prev + 1 : prev, nShares)
-    levels.push({ kind: 'real', name: f.name, size: f.size, k, autoSize: false, file: f })
+    levels.push({ kind: 'real', name: f.name, size: f.size, k, file: f })
   }
-  const drop = $('dropSplit')
-  drop.classList.add('has-file')
-  $('dropSplitText').textContent = `已选 ${levels.length} 个文件（每个文件一层）· 点击继续添加`
+  // 有了文件，大拖放框就让位给下面的分半按钮（左半继续拖/选，右半加假层）
+  $('dropSplit').hidden = true
   renderLevels()
 }
 
-const fileSplitInput = bindDrop('dropSplit', true, addRealFiles)
+const fileSplitInput = bindDrop([$<HTMLElement>('dropSplit'), $<HTMLElement>('btnAddMore')], true, addRealFiles)
+
+$<HTMLInputElement>('alignCheck').addEventListener('change', (e) => {
+  alignEnabled = (e.target as HTMLInputElement).checked
+  syncAlignUi()
+})
+syncAlignUi()
+
+/**
+ * 真层链严格递增（k₁ < k₂ < … ，至少相差 1；假层不参与）。
+ * 从被编辑的层向两边传播：向后只抬不降（后面 ≥ 本层+1），
+ * 向前只降不升（前面 ≤ 本层−1，最低压到 2）。
+ */
+function normalizeChain(edited: LevelRow): void {
+  const m = realLevels().length
+  const idx = levels.indexOf(edited)
+  for (let j = idx + 1; j < m; j++) {
+    const cur = levels[j]!
+    const min = levels[j - 1]!.k + 1
+    if (cur.k < min) {
+      cur.k = min
+      const inp = kInputs.get(cur)
+      if (inp) inp.value = String(cur.k)
+    }
+  }
+  for (let j = idx - 1; j >= 0; j--) {
+    const cur = levels[j]!
+    const max = levels[j + 1]!.k - 1
+    if (cur.k > max) {
+      cur.k = Math.max(2, max)
+      const inp = kInputs.get(cur)
+      if (inp) inp.value = String(cur.k)
+    }
+  }
+}
 
 /** 一层的一行：真文件 = 大小 + k；假文件 = 大小（可改）+ k（可超过 n） */
 function levelRow(lv: LevelRow, idx: number): HTMLElement {
   const isFake = lv.kind === 'fake'
   const row = el('div', `lv-row${isFake ? ' is-fake' : ''}`)
-  row.append(el('span', 'lv-idx', String(idx + 1)), el('span', 'lv-name', lv.name))
+  // 假文件就是一段随机乱码，没有文件名的概念，显示成"假文件层"就够了
+  row.append(el('span', 'lv-idx', String(idx + 1)), el('span', 'lv-name', isFake ? '假文件层' : lv.name))
   // 真文件的大小是既成事实，直接显示；假文件的大小可编辑，只留输入框
   if (!isFake) row.append(el('span', 'lv-size', fmtSize(lv.size)))
 
@@ -334,7 +373,6 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
       const kb = Number(sizeIn.value)
       if (Number.isFinite(kb) && kb > 0) {
         lv.size = Math.max(64, Math.round(kb * 1024))
-        lv.autoSize = false // 用户改过就不再跟随统计值
       }
     })
     row.append(el('label', 'lv-cell', '大小 ', sizeIn, ' KB'))
@@ -344,11 +382,11 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
   kIn.type = 'number'
   kIn.className = 'lv-k-in'
   kIn.min = '2'
-  kIn.max = String(isFake ? MAX_SHARES : nShares)
+  kIn.max = String(MAX_SHARES)
   kIn.value = String(lv.k)
   kIn.title = isFake
     ? '这一层永远解不开；可以设到 n 以上，那就连凑都凑不齐'
-    : '这一层至少需要多少片才能解开（≤ n）'
+    : '这一层至少需要多少片才能解开；超过 n 会把整套的 n 拉到和它一样大'
   // 假层的 k 允许超过 n：那意味着这套分片永远凑不齐它。
   // n 不写进多层密文，所以恢复端没法自己判断，只能在拆分端把话说明白。
   let overHint: HTMLElement | null = null
@@ -365,8 +403,16 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
   }
   kIn.addEventListener('input', () => {
     const v = Number(kIn.value)
-    if (Number.isFinite(v)) lv.k = clampK(v, isFake ? MAX_SHARES : nShares)
+    if (Number.isFinite(v)) lv.k = clampK(v, MAX_SHARES)
     if (isFake) fakeKDirty = true
+    // 真层链严格递增（k₁ < k₂ < … ，至少相差 1；假层不在此列）：
+    // 本层改大越过后面 → 后面逐层 +1 抬上去；本层改小低于前面 → 前面逐层 −1 压下来
+    if (!isFake) normalizeChain(lv)
+    // 链抬完后最大真层 k 可能超过 n：拉 n 到和它一样大（假层例外，它允许 > n）
+    if (!isFake) {
+      const maxK = Math.max(...realLevels().map((l) => l.k))
+      if (maxK > nShares) setNShares(maxK)
+    }
     syncOver()
     refreshSplitBtn()
   })
@@ -384,7 +430,8 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
     kOver.delete(lv)
     if (isFake) sealed = false
     if (levels.length === 0) {
-      $('dropSplit').classList.remove('has-file')
+      // 一层不剩，大拖放框回来
+      $('dropSplit').hidden = false
       $('dropSplitText').textContent = '拖文件到这里，或点击选择（可多选）'
     }
     renderLevels()
@@ -405,7 +452,6 @@ function renderLevels(): void {
 
   $('nRow').hidden = levels.length === 0
   $('levelMore').hidden = levels.length === 0 || sealed
-  $('levelHint').hidden = levels.length === 0
 
   const f = fakeLevel()
   const box = $('fakeBox')
@@ -414,26 +460,39 @@ function renderLevels(): void {
   fakeList.textContent = ''
   if (f) fakeList.append(levelRow(f, levels.length - 1))
 
-  syncFakeUi()
+  syncAlignUi()
   refreshSplitBtn()
 }
 
-/** 密钥串对齐目标：一片里一共几组 k:v（真层 + 假层 + 诱饵） */
+/** 密钥串对齐目标：一片里一共几组 k:v（真层 + 假层 + 没有密文的补位组） */
 function targetKv(): number {
   const chain = levels.length
-  // 对齐是假文件层的配套功能：没加假层就原样输出，不做任何补位
-  if (!fakeLevel()) return chain
+  if (!alignEnabled) return chain
   if (fakeAlign === '256') return Math.max(256, chain)
   if (fakeAlign === '32') return chain >= 32 ? Math.max(256, chain) : 32
   return Math.max(fakeCustom, chain)
 }
 
+/**
+ * 对齐开关的可见性：
+ *   0 层、1 层 → 可勾可取消，默认关；
+ *   ≥2 层 → 强制勾选且不可取消（多层不对齐会从组数反推真实层数）。
+ */
+function syncAlignUi(): void {
+  const cb = $<HTMLInputElement>('alignCheck')
+  const n = levels.length
+  if (n >= 2) alignEnabled = true
+  cb.disabled = n >= 2
+  cb.checked = alignEnabled
+  $<HTMLElement>('alignOpts').hidden = !alignEnabled
+  syncFakeUi()
+}
+
 function syncFakeUi(): void {
-  const f = fakeLevel()
   $<HTMLInputElement>('fakeCount').hidden = fakeAlign !== 'custom'
   const warn = $('fakeWarn')
   // 只有"自定义"是实验性的：32 / 256 是固定档位，跑过完整测试
-  if (fakeAlign === 'custom') {
+  if (fakeAlign === 'custom' && alignEnabled) {
     const total = targetKv()
     // 每组 = 32 字节 y → base64 ≈ 44 字符，再加 ":k" 前缀；坐标只写一次
     const perShare = total * 48 + String(nShares).length + 8
@@ -442,14 +501,14 @@ function syncFakeUi(): void {
   } else {
     warn.hidden = true
   }
-  if (!f) {
+  if (!alignEnabled) {
     $('fakeSummary').textContent = ''
     return
   }
   const total = targetKv()
-  const pad = Math.max(0, total - levels.length)
+  const fake = Math.max(0, total - realLevels().length)
   $('fakeSummary').textContent =
-    `密钥串 ${total.toLocaleString()} 组：真 ${realLevels().length} · 假 1 · 诱饵 ${pad.toLocaleString()}`
+    `密钥串 ${total.toLocaleString()} 组：真 ${realLevels().length} · 假 ${fake.toLocaleString()}`
 }
 
 /** 加入唯一的假文件层：必定最后一层，之后不能再加文件 */
@@ -459,10 +518,9 @@ function addFake(): void {
   const stats = sizeStats(reals.map((l) => l.size))
   levels.push({
     kind: 'fake',
-    name: FAKE_NAME,
+    name: '',
     size: randSize(stats),
     k: fakeK(reals.map((l) => l.k), nShares),
-    autoSize: true,
   })
   sealed = true
   fakeKDirty = false
@@ -475,7 +533,6 @@ function resetFake(): void {
   if (!f) return
   const reals = realLevels()
   f.size = randSize(sizeStats(reals.map((l) => l.size)))
-  f.autoSize = true
   f.k = fakeK(reals.map((l) => l.k), nShares)
   fakeKDirty = false
   renderLevels()
@@ -614,6 +671,9 @@ const splitRun = new Run('runLog', 'runProg', [
       $<HTMLButtonElement>('btnAddFake').disabled = true
       $<HTMLButtonElement>('btnApplyFake').disabled = true
       $<HTMLInputElement>('otsCheck').disabled = true
+      $<HTMLInputElement>('alignCheck').disabled = true
+      $<HTMLSelectElement>('fakeAlign').disabled = true
+      $<HTMLInputElement>('fakeCount').disabled = true
       fileSplitInput.disabled = true
       $('dropSplit').classList.add('is-disabled')
     },
@@ -622,8 +682,11 @@ const splitRun = new Run('runLog', 'runProg', [
       $<HTMLButtonElement>('btnAddFake').disabled = false
       $<HTMLButtonElement>('btnApplyFake').disabled = false
       $<HTMLInputElement>('otsCheck').disabled = false
+      $<HTMLSelectElement>('fakeAlign').disabled = false
+      $<HTMLInputElement>('fakeCount').disabled = false
       fileSplitInput.disabled = false
       $('dropSplit').classList.remove('is-disabled')
+      syncAlignUi()
       refreshSplitBtn()
     },
   },
@@ -686,7 +749,7 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
 
     const mulmods = n * plan.reduce((a, l) => a + Math.min(l.k, n) - 1, 0)
     run.line(
-      `${chain} 层（真 ${realLevels().length} · 假 ${plan.length - realLevels().length}）+ 诱饵 ${padCount} 组 · n=${n} · 预计 ${mulmods.toLocaleString()} 次模乘`,
+      `第 ${chain} 层 · n=${n} · 预计 ${mulmods.toLocaleString()} 次模乘`,
     )
     if (mulmods > 2e7) run.line(`⚠️ 计算量偏大，可能要几十秒到几分钟，页面可以继续滚动`, 'lg-warn')
 
@@ -743,7 +806,9 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
         run.prog(pct)
         const garbage = randomGarbage(Math.max(64, Math.round(lv.size)))
         payloads.push({
-          name: lv.name,
+          // 假文件没有名字可言：它就是一段 k 无意义的随机二进制，
+          // 内层因此不写 FILENAME，谁也看不到一个"假名字"
+          name: '',
           origSize: garbage.length,
           stored: garbage,
           algo: ALGO.NONE,
@@ -753,25 +818,6 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
           key: randomFieldBytes(),
           splitKey: randomFieldBytes(),
         })
-      }
-    }
-
-    // 真实文件压缩后普遍比原文件小，假文件却不会被压缩。
-    // 自动大小的假文件按实际存储长度重新标定，免得密文长度一眼看出谁真谁假。
-    const autoFake = plan.find((l) => l.kind === 'fake' && l.autoSize)
-    if (autoFake) {
-      const stored = payloads.filter((_, i) => plan[i]!.kind === 'real').map((p) => p.stored.length)
-      if (stored.length > 0) {
-        const idx = plan.findIndex((l) => l === autoFake)
-        const stats = sizeStats(stored)
-        const size = randSize(stats)
-        const p = payloads[idx]!
-        if (size !== p.stored.length) {
-          p.stored = randomGarbage(size)
-          p.origSize = size
-          p.hash = await sha256(p.stored)
-          run.line(`[${idx + 1}/${chain}] 假文件大小按压缩后的真实长度标定为 ${fmtSize(size)}`)
-        }
       }
     }
 
@@ -787,7 +833,8 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
       // 跟着载荷一起被加密。外层因此只剩 K + IV + 密文，看不出这套有几层。
       const nextLayer = nested
       const chunks = [
-        { tag: TSPK.TAG.FILENAME, value: new TextEncoder().encode(p.name) },
+        // 假层 name 为空 → 不写 FILENAME（它没有名字可言）
+        ...(p.name ? [{ tag: TSPK.TAG.FILENAME, value: new TextEncoder().encode(p.name) }] : []),
         { tag: TSPK.TAG.CREATED_AT, value: u64beBytes(now) },
         { tag: TSPK.TAG.SHA256, value: p.hash },
         ...(p.mime ? [{ tag: TSPK.TAG.MIME, value: new TextEncoder().encode(p.mime) }] : []),
@@ -884,7 +931,7 @@ function renderSplitResult(payloads: LevelPayload[], hasOts: boolean): void {
   const chainKs = r.ks.slice(0, r.chain)
   const kText = chainKs.length > 4 ? `${chainKs.slice(0, 3).join('/')}…/${chainKs[chainKs.length - 1]}` : chainKs.join('/')
   $('ctMeta').textContent =
-    `${r.chain} 层（真 ${r.realCount} · 假 ${r.fakeCount}）+ 诱饵 ${r.padCount} 组 · 明文合计 ${fmtSize(totalOrig)} → 密文 ${fmtSize(r.ciphertext.length)} · k=${kText} · n=${nShares}`
+    `第 ${r.chain} 层 · 明文合计 ${fmtSize(totalOrig)} → 密文 ${fmtSize(r.ciphertext.length)} · k=${kText} · n=${nShares}`
 
   const box = $('otsBox')
   if (hasOts) {
@@ -1131,7 +1178,7 @@ function renderShareList(): void {
     const kBrief = ks.length > 3 ? `${ks[0]}…${ks[ks.length - 1]}` : ks.join('/')
     row.append(
       el('span', 'mini-idx', `#${s.index}`),
-      el('span', 'mini-name', `${s.levels.length} 组密钥 · k=${kBrief} · ${text.length} 字符`),
+      el('span', 'mini-meta', `${s.levels.length} 组密钥 · k=${kBrief} · ${text.length} 字符`),
       del,
     )
     list.append(row)
@@ -1169,7 +1216,7 @@ function refreshRestoreBtn(): void {
   btn.disabled = shares.length < activeCt.k
 }
 
-const fileCtInput = bindDrop('dropCt', true, (files) => void ingestFiles(files))
+const fileCtInput = bindDrop([$<HTMLElement>('dropCt')], true, (files) => void ingestFiles(files))
 
 function addShareFromInput(): void {
   const input = $<HTMLInputElement>('shareInput')
@@ -1367,7 +1414,7 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
         el(
           'div',
           'hint',
-          `另外 ${rest} 组密钥是诱饵：没有对应的密文，只是把密钥串撑到固定组数，让人看不出真实层数。`,
+          `另外 ${rest} 组密钥是假的：没有对应的密文，只是把密钥串撑到固定组数，让人看不出真实层数。`,
         ),
       )
     }

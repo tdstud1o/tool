@@ -8,13 +8,11 @@ export type LevelKind = 'real' | 'fake'
 
 export interface LevelPlan {
   kind: LevelKind
-  /** 展示名（真实 = 原文件名；假 = part_01.bin） */
+  /** 展示名（真实 = 原文件名；假 = 无名字，界面直接写"假文件层"） */
   name: string
-  /** 真实 = 文件字节数；假 = 假明文字节数 */
+  /** 真实 = 文件字节数；假 = 假明文字节数（UI 先算一次默认值，用户不改就用它） */
   size: number
   k: number
-  /** 假文件：大小是否仍跟随统计值（用户手改过就变 false） */
-  autoSize: boolean
 }
 
 export type Pattern = { type: 'arith' | 'geo'; step: number }
@@ -79,9 +77,6 @@ export function nextK(ks: number[]): number {
 export function fakeK(reals: number[], n: number): number {
   return Math.min(nextK(reals), Math.max(2, n))
 }
-
-/** 假文件的名字：像个普通分卷，不暗示真假 */
-export const FAKE_NAME = 'part_01.bin'
 
 /**
  * 密钥串对齐：在链尾继续按规律编 k，补够 total 组。
