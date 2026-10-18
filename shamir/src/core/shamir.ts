@@ -1,17 +1,22 @@
 // Shamir 秘密共享：secp256k1 基域 GF(p)，p = 2²⁵⁶ − 2³² − 977。
 //
-// 分片字节布局（format.ts 里的 payload 就是这个字节串）：
-//   [y: 32 字节大端][x: w 字节大端]
-// 定长部分在前、变长部分在后：y 恒 32 字节，x 的宽度 w 由 n 决定
-// （n ≤ 255 → 1、n ≤ 65535 → 2、否则 3），w = 载荷长度 − 32。
-// 解析时先拿前 32 字节当 y，剩下的全是坐标，不用从头猜宽度。
+// 分片布局（见 format.ts）：
+//   TSK1:x:k₁:y₁:k₂:y₂…      x 只写一次，每组只有 [y: 32 字节大端]
+// x 是坐标（1..n），y = f(x) 的 32 字节大端。一组密钥材料恒 32 字节，
+// 与 n 大小无关；x 放在前缀里，省掉每组重复一份坐标。
+//
+// 多层：一个密文里套 m 层（TSCF 链），每层有自己的 key 与阈值 k，
+// 所有层共用同一套 x 坐标——所以一个人拿到的分片里带齐了 m 个 y。
+//
+// 槽位可以是 null（诱饵）：只写随机 y，没有多项式，也没有密文层。
+// 诱饵的存在是为了把密钥串撑到固定组数，让人看不出真实层数；
+// 谁拿诱饵去插值，只会解出一串随机字节。
 //
 // 与旧实现的区别：不再依赖 shamir-secret-sharing（GF(2⁸)，n ≤ 255），
 // 因此 x 不再被单字节坐标限制，n 可以到 MAX_SHARES。
 
 import {
   FIELD_LEN,
-  MAX_COORD_BYTES,
   MAX_SHARES,
   P,
   bytesToField,
@@ -25,15 +30,8 @@ import {
 /** 被共享的秘密长度：AES-256 密钥 */
 export const SECRET_LEN = FIELD_LEN
 
-/** 载荷长度 ≥ 1 + 32 */
-export const MIN_SHARE_LEN = 1 + FIELD_LEN
-
-/** 坐标宽度：n 越大 x 越宽 */
-export function coordWidth(n: number): number {
-  if (n <= 0xff) return 1
-  if (n <= 0xffff) return 2
-  return 3
-}
+/** 一组密钥材料的长度：只有一个 32 字节的 y */
+export const PAYLOAD_LEN = FIELD_LEN
 
 function randomField(): bigint {
   return bytesToField(randomFieldBytes())
@@ -46,53 +44,67 @@ function evalPoly(poly: bigint[], x: number): bigint {
   return y
 }
 
-function packShare(x: number, y: bigint, w: number): Uint8Array {
-  const out = new Uint8Array(FIELD_LEN + w)
-  out.set(fieldToBytes(y), 0)
-  let t = x
-  for (let i = out.length - 1; i >= FIELD_LEN; i--) {
-    out[i] = t & 0xff
-    t = Math.floor(t / 256)
-  }
-  return out
-}
-
-/** 解出坐标与 y；非法内容直接抛错，不静默吞掉 */
-export function unpackShare(buf: Uint8Array): { x: number; y: bigint } {
-  if (buf.length <= FIELD_LEN) throw new Error('分片内容太短，不是有效的密钥材料')
-  const w = buf.length - FIELD_LEN
-  if (w > MAX_COORD_BYTES) throw new Error('分片内容过长，不是有效的密钥材料')
-  const y = bytesToField(buf.subarray(0, FIELD_LEN))
-  let x = 0
-  for (let i = FIELD_LEN; i < buf.length; i++) x = x * 256 + buf[i]!
+/** 校验一组载荷并把 y 读成域元素；长度/范围不对直接抛错 */
+export function readY(buf: Uint8Array): bigint {
+  if (buf.length !== PAYLOAD_LEN)
+    throw new Error(`每组密钥材料必须是 ${PAYLOAD_LEN} 字节，当前 ${buf.length}`)
+  const y = bytesToField(buf)
   if (y >= P) throw new Error('分片数值非法（超出 secp256k1 域范围），可能已损坏')
-  return { x, y }
+  return y
 }
 
 /**
- * 把 secret 拆成 n 片，任意 k 片可恢复。
- * 坐标取 1..n 洗牌后分配；x 本身不是秘密，洗牌只是沿用旧行为，
- * 让分片顺序与文件序号不对应。
+ * 多层拆分：一次算出 m 个槽位的 y，全部共用同一套洗牌坐标。
+ * secrets 里为 null 的槽位是诱饵：y 直接取随机值，不建多项式，ks 对应的
+ * 位置只当作标签（可以超过 n，因为本来就没有能解出来的东西）。
+ *
+ * 输出布局（每人 shareLen = m × 32 字节）：
+ *   [y₀: 32][y₁: 32]…[y_{m−1}: 32]
+ * 每组的载荷就是连续切片，主线程直接 slice → base64，不用再拼一次。
+ * 坐标 x 不放进载荷，而是随结果数组返回，由分片文本写一次。
  */
-export async function shamirSplit(
-  secret: Uint8Array,
+export async function shamirSplitMulti(
+  secrets: (Uint8Array | null)[],
   n: number,
-  k: number,
+  ks: number[],
   onProgress?: (done: number, total: number) => void,
-): Promise<Uint8Array[]> {
-  if (secret.length !== SECRET_LEN) throw new Error(`秘密必须是 ${SECRET_LEN} 字节，当前 ${secret.length}`)
-  if (!Number.isInteger(k) || !Number.isInteger(n)) throw new Error('k 和 n 必须是整数')
-  if (k < 2) throw new Error('k 至少为 2')
-  if (n < k) throw new Error('n 不能小于 k')
+): Promise<{ buffer: Uint8Array; shareLen: number; count: number; m: number; xs: number[] }> {
+  const m = secrets.length
+  if (m === 0) throw new Error('至少要有一个秘密')
+  if (ks.length !== m) throw new Error('k 的数量必须与秘密数量一致')
+  if (!Number.isInteger(n) || n < 2) throw new Error('n 必须是 ≥ 2 的整数')
   if (n > MAX_SHARES) throw new Error(`分片数最多 ${MAX_SHARES}`)
 
-  const s = bytesToField(secret)
-  // 正常流程不会走到这里：密钥由 randomFieldBytes 生成，天然 < P。
-  // 绝不取模归约——那会把两个不同的密钥映射到同一个元素。
-  if (s >= P) throw new Error('密钥数值超出 secp256k1 域范围（应由 randomFieldBytes 生成）')
-
-  const poly: bigint[] = [s]
-  for (let i = 1; i < k; i++) poly.push(randomField())
+  const polys: (bigint[] | null)[] = []
+  /** 每个槽位在随机缓冲里的下标；−1 = 有真实秘密 */
+  const slotOf: number[] = new Array(m).fill(-1)
+  let padCount = 0
+  for (let j = 0; j < m; j++) {
+    const secret = secrets[j] ?? null
+    const k = ks[j]!
+    if (secret === null) {
+      slotOf[j] = padCount++
+      polys.push(null)
+      continue
+    }
+    if (secret.length !== SECRET_LEN) throw new Error(`秘密必须是 ${SECRET_LEN} 字节，当前 ${secret.length}`)
+    if (!Number.isInteger(k) || k < 2) throw new Error(`第 ${j + 1} 层 k 至少为 2`)
+    if (n < k) throw new Error(`第 ${j + 1} 层 k=${k} 超过总片数 n=${n}`)
+    const s = bytesToField(secret)
+    // 正常流程不会走到这里：密钥由 randomFieldBytes 生成，天然 < P。
+    // 绝不取模归约——那会把两个不同的密钥映射到同一个元素。
+    if (s >= P) throw new Error('密钥数值超出 secp256k1 域范围（应由 randomFieldBytes 生成）')
+    const poly: bigint[] = [s]
+    for (let i = 1; i < k; i++) poly.push(randomField())
+    polys.push(poly)
+  }
+  /** 每片一份新的随机 y（诱饵槽），一次取够 32 × 槽数 */
+  const scratch = new Uint8Array(padCount * FIELD_LEN)
+  const fillScratch = (): void => {
+    // getRandomValues 单次上限 65536 字节
+    for (let off = 0; off < scratch.length; off += 65536)
+      crypto.getRandomValues(scratch.subarray(off, Math.min(scratch.length, off + 65536)))
+  }
 
   const xs = Array.from({ length: n }, (_, i) => i + 1)
   const rnd = new Uint32Array(n)
@@ -110,32 +122,62 @@ export async function shamirSplit(
     xs[j] = t
   }
 
-  const w = coordWidth(n)
-  const shares: Uint8Array[] = new Array(n)
+  const unit = PAYLOAD_LEN
+  const shareLen = unit * m
+  const buffer = new Uint8Array(n * shareLen)
+
   // 进度回调最多报 100 次，避免 n 很大时刷屏
   const step = Math.max(1, Math.floor(n / 100))
   for (let i = 0; i < n; i++) {
     const x = xs[i]!
-    shares[i] = packShare(x, evalPoly(poly, x), w)
+    const base = i * shareLen
+    if (padCount > 0) fillScratch()
+    for (let j = 0; j < m; j++) {
+      const off = base + j * unit
+      const poly = polys[j]!
+      const slot = slotOf[j]!
+      if (poly) buffer.set(fieldToBytes(evalPoly(poly, x)), off)
+      else buffer.set(scratch.subarray(slot * FIELD_LEN, (slot + 1) * FIELD_LEN), off)
+    }
     if (onProgress && (i + 1) % step === 0) onProgress(i + 1, n)
   }
   onProgress?.(n, n)
-  return shares
+  return { buffer, shareLen, count: n, m, xs }
+}
+
+/**
+ * 单层拆分（多层实现的薄包装，测试与旧调用方用）。
+ * 坐标取 1..n 洗牌后分配；x 本身不是秘密，洗牌只是沿用旧行为，
+ * 让分片顺序与文件序号不对应。
+ */
+export async function shamirSplit(
+  secret: Uint8Array,
+  n: number,
+  k: number,
+  onProgress?: (done: number, total: number) => void,
+): Promise<{ shares: Uint8Array[]; xs: number[] }> {
+  const { buffer, shareLen, count, xs } = await shamirSplitMulti([secret], n, [k], onProgress)
+  const shares: Uint8Array[] = new Array(count)
+  for (let i = 0; i < count; i++) shares[i] = buffer.subarray(i * shareLen, (i + 1) * shareLen)
+  return { shares, xs }
 }
 
 /**
  * 用给定分片恢复秘密（传入多少片就用多少片，调用方负责至少凑够 k）。
- * 任一坐标重复、x = 0、y ≥ p 都会拒绝。
+ * xs 必须与 shares 一一对应；任一坐标重复、x = 0/越界、y ≥ p 都会拒绝。
  */
 export async function shamirCombine(
   shares: Uint8Array[],
+  xs: number[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<Uint8Array> {
   if (shares.length < 2) throw new Error('至少需要 2 片才能恢复')
-  const pts = shares.map(unpackShare)
+  if (xs.length !== shares.length) throw new Error('分片数量与坐标数量不一致')
+  const pts = shares.map((buf, i) => ({ x: xs[i]!, y: readY(buf) }))
   const seen = new Set<number>()
   for (const p of pts) {
-    if (p.x === 0) throw new Error('分片坐标非法（x = 0 会直接暴露密钥），已拒绝')
+    if (!Number.isInteger(p.x) || p.x < 1 || p.x > MAX_SHARES)
+      throw new Error(`分片坐标非法（x = ${p.x}）`)
     if (seen.has(p.x)) throw new Error(`坐标 #${p.x} 出现重复分片，无法确定用哪一片`)
     seen.add(p.x)
   }

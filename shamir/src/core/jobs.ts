@@ -56,28 +56,28 @@ function run<T>(msg: object, onProgress?: JobProgress): Promise<T> {
   })
 }
 
-/** 在后台线程拆分；返回按坐标分配顺序排列的分片（每片 = [y:32][x:w]） */
+/** 在后台线程多层拆分；返回按人排列的 buffer（每组 32 字节的 y 是连续切片） */
 export async function splitInWorker(
-  secret: Uint8Array,
+  secrets: (Uint8Array | null)[],
   n: number,
-  k: number,
+  ks: number[],
   onProgress?: JobProgress,
-): Promise<Uint8Array[]> {
-  const { buffer, shareLen } = await run<{ buffer: ArrayBuffer; shareLen: number }>(
-    { type: 'split', secret, n, k },
-    onProgress,
-  )
-  const count = buffer.byteLength / shareLen
-  const shares: Uint8Array[] = new Array(count)
-  for (let i = 0; i < count; i++) shares[i] = new Uint8Array(buffer, i * shareLen, shareLen)
-  return shares
+): Promise<{ buffer: ArrayBuffer; shareLen: number; count: number; m: number; xs: number[] }> {
+  const { buffer, shareLen, m, xs } = await run<{
+    buffer: ArrayBuffer
+    shareLen: number
+    m: number
+    xs: number[]
+  }>({ type: 'split', secrets, n, ks }, onProgress)
+  return { buffer, shareLen, count: buffer.byteLength / shareLen, m, xs }
 }
 
-/** 在后台线程恢复 */
+/** 在后台线程恢复；xs 与 shares 一一对应 */
 export async function combineInWorker(
   shares: Uint8Array[],
+  xs: number[],
   onProgress?: JobProgress,
 ): Promise<Uint8Array> {
-  const { secret } = await run<{ secret: ArrayBuffer }>({ type: 'combine', shares }, onProgress)
+  const { secret } = await run<{ secret: ArrayBuffer }>({ type: 'combine', shares, xs }, onProgress)
   return new Uint8Array(secret)
 }

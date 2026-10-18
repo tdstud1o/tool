@@ -1,7 +1,9 @@
 // 端到端往返测试：node --experimental-strip-types test/roundtrip.ts
 import { randomBytes, aesEncrypt, aesDecrypt, sha256 } from '../src/core/crypto.ts'
-import { TSPK, TSCF, tlvBuild, tlvParse, u64beBytes } from '../src/core/tlv.ts'
-import { shamirSplit, shamirCombine, unpackShare } from '../src/core/shamir.ts'
+import { TSPK, TSCF, tlvBuild, tlvParse, u32beBytes, u64beBytes } from '../src/core/tlv.ts'
+import { shamirSplit, shamirSplitMulti, shamirCombine, readY } from '../src/core/shamir.ts'
+import { fakeK, kPattern, nextK, padKs, sizeStats } from '../src/core/levels.ts'
+import { toB64 } from '../src/core/b64.ts'
 import { MAX_SHARES, P, bytesToField, randomFieldBytes } from '../src/core/gfp.ts'
 import { encodeShare, parseShareLine, parseShares, checkConsistency } from '../src/core/format.ts'
 import { parseOts, isAllowedCalendarUri } from '../src/core/ots.ts'
@@ -118,34 +120,28 @@ const ctFile = tlvBuild(TSCF.MAGIC, TSCF.VERSION, [
 ], { lastTag: TSCF.LAST_TAG })
 
 // —— 模拟恢复侧 ——
-const shares = await shamirSplit(key, 5, 3)
-const texts = shares.map((s) => encodeShare(3, s))
+const { shares, xs } = await shamirSplit(key, 5, 3)
+const texts = shares.map((s, i) => encodeShare({ index: xs[i]!, levels: [{ k: 3, payload: s }] }))
 const parsed = parseShares(texts.join('\n'))
-const k = checkConsistency(parsed, 3)
-const recoveredKey = await shamirCombine(parsed.slice(0, k).map((s) => s.payload))
+const ks0 = checkConsistency(parsed, 3)
+const k = ks0[0]!
+const recoveredKey = await shamirCombine(
+  parsed.slice(0, k).map((s) => s.levels[0]!.payload),
+  parsed.slice(0, k).map((s) => s.index),
+)
 check('Shamir combine = 原 key', bytesEq(recoveredKey, key))
-check('分片载荷 = 32 字节 y + 1 字节坐标', parsed.every((s) => s.payload.length === 33))
+check('每组密钥材料恒 32 字节', parsed.every((s) => s.levels[0]!.payload.length === 32))
+check('分片文本形如 TSK1:x:k:y', /^TSK1:\d+:\d+:[A-Za-z0-9+/=]+$/.test(texts[0]!))
 
-/** 按布局 [y: 32][x: w] 独立读坐标，不复用实现里的解析 */
-function readTailCoord(b: Uint8Array): number {
-  let v = 0
-  for (let i = 32; i < b.length; i++) v = v * 256 + b[i]!
-  return v
-}
-
-check('坐标在载荷末尾且互不相同', (() => {
+check('坐标在分片前缀里且互不相同', (() => {
   const idx = parsed.map((s) => s.index)
-  return (
-    idx.every((v, i) => v === readTailCoord(parsed[i]!.payload)) &&
-    new Set(idx).size === idx.length &&
-    idx.every((v) => v >= 1 && v <= 5)
-  )
+  return new Set(idx).size === idx.length && idx.every((v) => v >= 1 && v <= 5)
 })())
-check('y 在载荷前 32 字节（用固定密钥可反推 f(x) 一致性）', (() => {
-  const u = unpackShare(parsed[0]!.payload)
-  return u.y === bytesToField(parsed[0]!.payload.subarray(0, 32))
+check('y 就是载荷本身（32 字节大端）', (() => {
+  const pay = parsed[0]!.levels[0]!.payload
+  return readY(pay) === bytesToField(pay)
 })())
-check('unpackShare 坐标与解析结果一致', parsed.every((s) => unpackShare(s.payload).x === s.index))
+check('解析出的坐标与拆分时给的 x 一致', parsed.every((s, i) => s.index === xs[i]))
 
 const outerBack = tlvParse(TSCF.MAGIC, ctFile)
 const ctBack = outerBack.chunks.get(TSCF.TAG.CIPHERTEXT)!
@@ -188,51 +184,65 @@ check('少于 k 片报错', (() => {
 })())
 check('同 index 不同 k 报错', (() => {
   try {
-    parseShares(texts.join('\n') + '\nTSK1:4:' + texts[0]!.split(':')[2])
+    const s0 = parsed[0]!
+    parseShares(texts.join('\n') + `\nTSK1:${s0.index}:4:${toB64(s0.levels[0]!.payload)}`)
     return false
   } catch { return true }
 })())
 check('未知分片版本报错', (() => {
-  try { parseShareLine('TSK2:3:AAAA'); return false } catch { return true }
+  try { parseShareLine('TSK2:3:3:AAAA'); return false } catch { return true }
 })())
 check('垃圾文本报错', (() => {
   try { parseShares('hello world'); return false } catch { return true }
 })())
 
-// 4b) 换成 secp256k1 基域后，n 不再受 255 限制
+// 4b) 换成 secp256k1 基域后，n 不再受 255 限制；坐标只写在文本前缀里
 const big = await shamirSplit(key, 300, 5)
-check('n=300 坐标宽度升到 2 字节', big.every((s) => s.length === 34))
-check('n=300 坐标占末 2 字节并与解析一致', big.every((s) => {
-  const tail = readTailCoord(s)
-  return tail === unpackShare(s).x && tail >= 1 && tail <= 300
-}))
-const bigParsed = parseShares(big.map((s) => encodeShare(5, s)).join('\n'))
+check('n=300 每组仍恒 32 字节', big.shares.every((s) => s.length === 32))
+check('n=300 坐标占 1..300 且互异', big.xs.length === 300 && new Set(big.xs).size === 300 && big.xs.every((v) => v >= 1 && v <= 300))
+const bigParsed = parseShares(
+  big.shares.map((s, i) => encodeShare({ index: big.xs[i]!, levels: [{ k: 5, payload: s }] })).join('\n'),
+)
 check('n=300 解析出 300 个互异坐标', bigParsed.length === 300 && new Set(bigParsed.map((s) => s.index)).size === 300)
 check('n=300 坐标落在 1..300', bigParsed.every((s) => s.index >= 1 && s.index <= 300))
-check('n=300 前 5 片可恢复', bytesEq(await shamirCombine(bigParsed.slice(0, 5).map((s) => s.payload)), key))
-check('n=300 末 5 片可恢复', bytesEq(await shamirCombine(bigParsed.slice(-5).map((s) => s.payload)), key))
-check('n=300 跨区间挑片可恢复', bytesEq(
-  await shamirCombine([bigParsed[0]!, bigParsed[150]!, bigParsed[299]!, bigParsed[7]!, bigParsed[42]!].map((s) => s.payload)),
+check('n=300 前 5 片可恢复', bytesEq(
+  await shamirCombine(bigParsed.slice(0, 5).map((s) => s.levels[0]!.payload), bigParsed.slice(0, 5).map((s) => s.index)),
   key,
 ))
-check('n=65536 坐标宽度升到 3 字节', (await shamirSplit(key, 65536, 3)).every((s) => s.length === 35))
+check('n=300 末 5 片可恢复', bytesEq(
+  await shamirCombine(bigParsed.slice(-5).map((s) => s.levels[0]!.payload), bigParsed.slice(-5).map((s) => s.index)),
+  key,
+))
+check('n=300 跨区间挑片可恢复', bytesEq(
+  await shamirCombine(
+    [bigParsed[0]!, bigParsed[150]!, bigParsed[299]!, bigParsed[7]!, bigParsed[42]!].map((s) => s.levels[0]!.payload),
+    [bigParsed[0]!, bigParsed[150]!, bigParsed[299]!, bigParsed[7]!, bigParsed[42]!].map((s) => s.index),
+  ),
+  key,
+))
+check('n=65536 时每组依然 32 字节（x 不进载荷）', (await shamirSplit(key, 65536, 3)).shares.every((s) => s.length === 32))
 check('k=1 报错', await shamirSplit(key, 3, 1).then(() => false, () => true))
 check('k > n 报错', await shamirSplit(key, 3, 4).then(() => false, () => true))
 
 // 4c) 素域下的损坏 / 恶意分片
 check('y ≥ p 的分片被拒绝', (() => {
-  const bad = new Uint8Array(33)
-  bad.fill(0xff, 0, 32) // y = 2²⁵⁶ − 1 > p（y 在前 32 字节）
-  bad[32] = 1 // x = 1
-  try { unpackShare(bad); return false } catch { return true }
+  const bad = new Uint8Array(32)
+  bad.fill(0xff) // y = 2²⁵⁶ − 1 > p
+  try { readY(bad); return false } catch { return true }
 })())
-check('x=0 的分片被 combine 拒绝', await shamirCombine([
-  Uint8Array.from([0, ...new Uint8Array(32)]),
-  parsed[0]!.payload,
-]).then(() => false, () => true))
-check('重复坐标被 combine 拒绝', await shamirCombine([parsed[0]!.payload, parsed[0]!.payload]).then(() => false, () => true))
-check('长度不足 33 字节被拒绝', (() => {
-  try { unpackShare(new Uint8Array(32)); return false } catch { return true }
+check('x=0 的分片被 combine 拒绝', await shamirCombine(
+  [randomFieldBytes(), parsed[0]!.levels[0]!.payload],
+  [0, parsed[0]!.index],
+).then(() => false, () => true))
+check('重复坐标被 combine 拒绝', await shamirCombine(
+  [parsed[0]!.levels[0]!.payload, parsed[0]!.levels[0]!.payload],
+  [parsed[0]!.index, parsed[0]!.index],
+).then(() => false, () => true))
+check('载荷长度不是 32 字节被拒绝', (() => {
+  try { readY(new Uint8Array(31)); return false } catch { return true }
+})())
+check('载荷长度不是 32 字节被拒绝（33 字节）', (() => {
+  try { readY(new Uint8Array(33)); return false } catch { return true }
 })())
 check('秘密 ≥ p 时拒绝分片（绝不取模）', await shamirSplit(new Uint8Array(32).fill(0xff), 3, 2).then(() => false, () => true))
 check('randomFieldBytes 2000 次全部 < p', (() => {
@@ -266,7 +276,7 @@ const packNoAlgo = tlvBuild(TSPK.MAGIC, TSPK.VERSION, [{ tag: TSPK.TAG.DATA, val
 check('缺 ALGO 的旧文件视为不压缩', (tlvParse(TSPK.MAGIC, packNoAlgo).chunks.get(TSPK.TAG.ALGO)?.[0] ?? 0) === ALGO.NONE)
 
 // 7) k / n 的 4 字节大端编码（n 可到 16,777,215，一字节装不下）
-const { u32beBytes, beBytesToUint } = await import('../src/core/tlv.ts')
+const { beBytesToUint } = await import('../src/core/tlv.ts')
 check('u32beBytes / beBytesToUint 往返', [2, 255, 256, 65535, 100000, 16777215].every((v) => beBytesToUint(u32beBytes(v)) === v))
 check('旧的单字节 k 也能读', beBytesToUint(Uint8Array.from([7])) === 7)
 
@@ -293,5 +303,188 @@ check(
     zmv.getUint32(eocdPos - 76, true) === 0x06064b50 &&
     Number(zmv.getBigUint64(eocdPos - 76 + 32, true)) === 70000,
 )
+
+// 9) 多层：一个密文套多份明文，一片里带齐每一组的密钥材料
+const keyA = randomFieldBytes()
+const keyB = randomFieldBytes()
+const keyC = randomFieldBytes()
+const LEVEL_KS = [2, 4, 6]
+const multi = await shamirSplitMulti([keyA, keyB, keyC], 7, LEVEL_KS)
+check('多层拆分：每人 = 3 × 32 字节', multi.shareLen === 3 * 32 && multi.count === 7 && multi.m === 3)
+check('多层拆分：每人一个坐标', multi.xs.length === 7 && new Set(multi.xs).size === 7)
+
+const UNIT = 32
+const multiTexts: string[] = []
+for (let i = 0; i < multi.count; i++) {
+  const parts = ['TSK1', String(multi.xs[i])]
+  for (let j = 0; j < 3; j++) {
+    const from = i * multi.shareLen + j * UNIT
+    parts.push(String(LEVEL_KS[j]), toB64(multi.buffer.subarray(from, from + UNIT)))
+  }
+  multiTexts.push(parts.join(':'))
+}
+const mp = parseShares(multiTexts.join('\n'))
+check('多层分片解析出 3 组', mp.length === 7 && mp.every((s) => s.levels.length === 3))
+check('多层各组 k 正确', mp.every((s) => s.levels.map((l) => l.k).join('/') === '2/4/6'))
+check('多层共用一个坐标（x 只在文本里出现一次）', mp.every((s, i) => s.index === multi.xs[i]))
+check('多层 k 一致性校验通过', checkConsistency(mp, 2).join('/') === '2/4/6')
+check('第 1 层 2 片还原 keyA', bytesEq(
+  await shamirCombine(mp.slice(0, 2).map((s) => s.levels[0]!.payload), mp.slice(0, 2).map((s) => s.index)),
+  keyA,
+))
+check('第 2 层 4 片还原 keyB', bytesEq(
+  await shamirCombine(mp.slice(0, 4).map((s) => s.levels[1]!.payload), mp.slice(0, 4).map((s) => s.index)),
+  keyB,
+))
+check('第 3 层 6 片还原 keyC', bytesEq(
+  await shamirCombine(mp.slice(0, 6).map((s) => s.levels[2]!.payload), mp.slice(0, 6).map((s) => s.index)),
+  keyC,
+))
+check('第 2 层只给 2 片时插值出错误密钥（不是 keyB）', !bytesEq(
+  await shamirCombine(mp.slice(0, 2).map((s) => s.levels[1]!.payload), mp.slice(0, 2).map((s) => s.index)),
+  keyB,
+))
+check('组数不一致的分片被拒绝', (() => {
+  try {
+    checkConsistency([mp[0]!, { ...mp[1]!, levels: mp[1]!.levels.slice(0, 2) }], 2)
+    return false
+  } catch { return true }
+})())
+check('坐标越界被解析器拒绝', (() => {
+  try {
+    parseShareLine(`TSK1:0:2:${toB64(mp[0]!.levels[0]!.payload)}`)
+    return false
+  } catch { return true }
+})())
+check('诱饵组：没有秘密也能拆，y 照样是 32 字节随机值', await (async () => {
+  const pad = await shamirSplitMulti([keyA, null, null], 5, [2, 999, 1000])
+  if (pad.m !== 3 || pad.shareLen !== 96) return false
+  const texts = Array.from({ length: pad.count }, (_, i) => {
+    const parts = ['TSK1', String(pad.xs[i])]
+    for (let j = 0; j < 3; j++) {
+      const from = i * pad.shareLen + j * UNIT
+      parts.push(String([2, 999, 1000][j]), toB64(pad.buffer.subarray(from, from + UNIT)))
+    }
+    return parts.join(':')
+  })
+  const p = parseShares(texts.join('\n'))
+  const recovered = await shamirCombine(
+    [p[0]!.levels[0]!.payload, p[1]!.levels[0]!.payload],
+    [p[0]!.index, p[1]!.index],
+  )
+  return (
+    bytesEq(recovered, keyA) &&
+    p.every((s) => s.levels.length === 3 && s.levels[1]!.payload.length === 32)
+  )
+})())
+
+// 10) 密文链：TSPK 0x13 原样嵌套下一层的 TSCF
+const ivB = randomBytes(12)
+const innerB = tlvBuild(TSPK.MAGIC, TSPK.VERSION, [{ tag: TSPK.TAG.DATA, value: new TextEncoder().encode('B') }], {
+  lastTag: TSPK.TAG.DATA,
+})
+const tscfB = tlvBuild(
+  TSCF.MAGIC,
+  TSCF.VERSION,
+  [
+    { tag: TSCF.TAG.K, value: u32beBytes(4) },
+    // 真实的多层链里没有 N：n 只写在单层密文上，链里不出现
+    { tag: TSCF.TAG.IV, value: ivB },
+    { tag: TSCF.TAG.CIPHERTEXT, value: await aesEncrypt(keyB, ivB, innerB) },
+  ],
+  { lastTag: TSCF.LAST_TAG },
+)
+const innerA = tlvBuild(
+  TSPK.MAGIC,
+  TSPK.VERSION,
+  [
+    { tag: TSPK.TAG.FILENAME, value: new TextEncoder().encode('a.bin') },
+    { tag: TSPK.TAG.NEXT, value: tscfB },
+    { tag: TSPK.TAG.DATA, value: new TextEncoder().encode('A') },
+  ],
+  { lastTag: TSPK.TAG.DATA },
+)
+const packA = tlvParse(TSPK.MAGIC, innerA)
+check('0x13 NEXT 原样保存下一层密文', bytesEq(packA.chunks.get(TSPK.TAG.NEXT)!, tscfB))
+check('嵌套的 TSCF 可独立解析', (() => {
+  const n = tlvParse(TSCF.MAGIC, packA.chunks.get(TSPK.TAG.NEXT)!)
+  let k = 0
+  for (const b of n.chunks.get(TSCF.TAG.K)!) k = k * 256 + b
+  return k === 4 && n.chunks.get(TSCF.TAG.CIPHERTEXT) !== undefined
+})())
+check('多层链里的 TSCF 不含 N，解析端不依赖它', (() => {
+  const n = tlvParse(TSCF.MAGIC, tscfB)
+  return n.chunks.get(TSCF.TAG.N) === undefined && n.chunks.get(TSCF.TAG.K) !== undefined
+})())
+check('DATA 仍排在 NEXT 之后（末块）', (() => {
+  const iData = innerA.length - 1
+  return innerA[iData] !== 0x13 && packA.chunks.get(TSPK.TAG.DATA)!.length === 1
+})())
+
+// 11) 假层 k 与密钥串对齐（诱饵组）
+check('nextK：只有一个真层时 +1', nextK([3]) === 4)
+check('nextK：等差序列顺着走（3,4 → 5）', nextK([3, 4]) === 5)
+// 两个点时等差/等比都能解释（4,8 既 +4 也 ×2），约定优先按等差走
+check('nextK：两点歧义时按等差续（4,8 → 12）', nextK([4, 8]) === 12)
+check('nextK：三点等比继续放大（4,8,16 → 32）', nextK([4, 8, 16]) === 32)
+check('nextK：无规律时 +1（3,7,8 → 9）', nextK([3, 7, 8]) === 9)
+check('fakeK 默认不超过 n', fakeK([3, 4], 5) === 5 && fakeK([3], 5) === 4)
+check('fakeK 不受 n 限制地跟随规律', fakeK([4, 8, 16], 10) === 10)
+
+check('k 等差规律被识别', kPattern([3, 5, 7])?.type === 'arith' && kPattern([3, 5, 7])?.step === 2)
+check('k 等比规律被识别', kPattern([4, 8, 16])?.type === 'geo' && kPattern([4, 8, 16])?.step === 2)
+check('k 无规律时返回 null', kPattern([3, 7, 8]) === null && kPattern([5]) === null)
+const stats2 = sizeStats([1000, 1000, 4000])
+check('sizeStats 浮动幅度 = |均值 − 中位数|', stats2.mean === 2000 && stats2.spread === 1000)
+check('单文件时给 5% 浮动（差值恒为 0）', (() => {
+  const s1 = sizeStats([1000])
+  return s1.mean === 1000 && s1.spread === 50
+})())
+
+check('padKs 补够 32 组：真 2 + 假 1 → 29 组诱饵', (() => {
+  const chain = [3, 4, 5]
+  const pad = padKs(chain, 32, [3, 4])
+  return pad.length === 29 && pad[0] === 6 && pad[28] === 34
+})())
+check('padKs 已够长时不补', padKs([3, 4, 5], 3, [3, 4]).length === 0)
+check('padKs 顺着等比规律放大', (() => {
+  const pad = padKs([4, 8, 16], 6, [4, 8, 16])
+  return pad.join(',') === '32,64,128'
+})())
+check('假层 k 可以超过 n（唯一允许的一层）', fakeK([3, 4], 5) <= 5 && 999 > 5)
+
+// kPattern 本身对 3 点等比给出 geo
+check('三点等比被识别为等比', kPattern([4, 8, 16])?.type === 'geo')
+
+// 12) 假层永远解不开：共享的密钥 ≠ 加密用的密钥 → GCM 校验失败
+const fakeTrueKey = randomFieldBytes()
+const fakeSplitKey = randomFieldBytes()
+const fakeIv = randomBytes(12)
+const fakeBody = tlvBuild(
+  TSPK.MAGIC,
+  TSPK.VERSION,
+  [{ tag: TSPK.TAG.DATA, value: new TextEncoder().encode('乱码') }],
+  { lastTag: TSPK.TAG.DATA },
+)
+const fakeCt = await aesEncrypt(fakeTrueKey, fakeIv, fakeBody)
+const fakeShares = await shamirSplit(fakeSplitKey, 5, 3)
+const fakeP1 = {
+  index: fakeShares.xs[0]!,
+  levels: [{ k: 3, payload: fakeShares.shares[0]! }],
+}
+const fakeP2 = {
+  index: fakeShares.xs[1]!,
+  levels: [{ k: 3, payload: fakeShares.shares[1]! }],
+}
+const fakeP3 = {
+  index: fakeShares.xs[2]!,
+  levels: [{ k: 3, payload: fakeShares.shares[2]! }],
+}
+const fakeBack = await shamirCombine(
+  [fakeP1, fakeP2, fakeP3].map((s) => s.levels[0]!.payload),
+  [fakeP1, fakeP2, fakeP3].map((s) => s.index),
+)
+check('假层：3 片确实插值出了那把"假密钥"', bytesEq(fakeBack, fakeSplitKey))
+check('假层：拿这把密钥解密真密文必定失败', await aesDecrypt(fakeBack, fakeIv, fakeCt).then(() => false, () => true))
 
 process.exit(failed ? 1 : 0)

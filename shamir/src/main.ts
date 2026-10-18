@@ -4,9 +4,18 @@ import { ALGO, ALGO_LABEL, compressData, decompressData, type AlgoId } from './c
 import { IV_LEN, KEY_LEN, aesDecrypt, aesEncrypt, randomBytes, sha256 } from './core/crypto.ts'
 import { splitInWorker, combineInWorker } from './core/jobs.ts'
 import { MAX_SHARES, randomFieldBytes } from './core/gfp.ts'
-import { checkConsistency, encodeShare, parseShareLine, type ShareEntry } from './core/format.ts'
-import { otsStamp, parseOts, toDetachedOts, upgradePending, verifyAnchorOnline } from './core/ots.ts'
-import { bytesEq, toHex } from './core/b64.ts'
+import { SHARE_PREFIX, checkConsistency, parseShareLine, sameLevels, type ShareEntry } from './core/format.ts'
+import { FAKE_NAME, fakeK, padKs, randSize, sizeStats, type LevelPlan } from './core/levels.ts'
+import {
+  OtsNoCorsError,
+  calendarHasCors,
+  otsStamp,
+  parseOts,
+  toDetachedOts,
+  upgradePending,
+  verifyAnchorOnline,
+} from './core/ots.ts'
+import { bytesEq, toB64, toHex } from './core/b64.ts'
 import { buildZip } from './core/zip.ts'
 
 /** 拆分结果里最多渲染多少行分片；超出部分折叠（n 可达十万级） */
@@ -193,7 +202,65 @@ function stageProgress(run: Run, from: number, to: number, label: string): (done
 
 // ===== 拆分 =====
 
-let splitFile: File | null = null
+/**
+ * 层：真实文件，或唯一的假文件（必定最后一层，且解不开）。
+ * k 每层独立；n 整套共用一个，所以只在这里出现一次。
+ */
+interface LevelRow extends LevelPlan {
+  file?: File
+}
+
+let levels: LevelRow[] = []
+/** 整套分片的份数：所有层共用（一个人只拿一片，片里带齐每一组的 y） */
+let nShares = 5
+/** 假文件层加入后封口：不再允许加入真文件 */
+let sealed = false
+let fakeAlign: '32' | '256' | 'custom' = '32'
+let fakeCustom = 32
+/** 假层的 k 被用户手改过之后，就不再跟随真实层的规律 */
+let fakeKDirty = false
+
+/** 每层 k 输入框，n 变化时回写上限（真层 k ≤ n，假层不受限） */
+const kInputs = new Map<LevelRow, HTMLInputElement>()
+/** 假层「k > n」角标，n 变了要跟着重算 */
+const kOver = new Map<LevelRow, HTMLElement>()
+
+const realLevels = (): LevelRow[] => levels.filter((l) => l.kind === 'real')
+const fakeLevel = (): LevelRow | undefined => levels.find((l) => l.kind === 'fake')
+
+function clampK(v: number, cap: number): number {
+  return Math.min(cap, Math.max(2, Math.round(v) || 2))
+}
+
+function setNShares(v: number): void {
+  const nc = Math.min(MAX_SHARES, Math.max(2, Math.round(v) || 2))
+  nShares = nc
+  for (const [lv, inp] of kInputs) {
+    if (lv.kind === 'fake') continue // 假层可以 k > n
+    inp.max = String(nc)
+    if (lv.k > nc) {
+      lv.k = nc
+      inp.value = String(nc)
+    }
+  }
+  const f = fakeLevel()
+  if (f && !fakeKDirty) {
+    f.k = fakeK(realLevels().map((l) => l.k), nc)
+    const inp = kInputs.get(f)
+    if (inp) inp.value = String(f.k)
+  }
+  // n 变了，假层"k > n（永远凑不齐）"的角标要跟着重算
+  for (const [lv, badge] of kOver) badge.hidden = lv.k <= nc
+  refreshSplitBtn()
+}
+
+const nSharesInput = $<HTMLInputElement>('nShares')
+nSharesInput.value = String(nShares)
+nSharesInput.addEventListener('input', () => {
+  const v = Number(nSharesInput.value)
+  if (Number.isFinite(v)) setNShares(v)
+})
+nSharesInput.addEventListener('blur', () => { nSharesInput.value = String(nShares) })
 
 function bindDrop(dropId: string, multiple: boolean, onFiles: (files: File[]) => void): HTMLInputElement {
   const drop = $(dropId)
@@ -224,51 +291,212 @@ function bindDrop(dropId: string, multiple: boolean, onFiles: (files: File[]) =>
   return input
 }
 
-function showSplitFile(f: File): void {
-  splitFile = f
+function addRealFiles(files: File[]): void {
+  if (sealed) return
+  for (const f of files) {
+    // 后续层默认比上一层多一片门槛：既符合"越深越难"的直觉，
+    // 也让假文件能顺着这个等差规律往下接
+    const prev = levels.length ? levels[levels.length - 1]!.k : Math.min(3, nShares)
+    const k = clampK(levels.length ? prev + 1 : prev, nShares)
+    levels.push({ kind: 'real', name: f.name, size: f.size, k, autoSize: false, file: f })
+  }
   const drop = $('dropSplit')
   drop.classList.add('has-file')
-  $('dropSplitText').textContent = `📄 ${f.name} · ${fmtSize(f.size)}${f.type ? ` · ${f.type}` : ''}`
+  $('dropSplitText').textContent = `已选 ${levels.length} 个文件（每个文件一层）· 点击继续添加`
+  renderLevels()
+}
+
+const fileSplitInput = bindDrop('dropSplit', true, addRealFiles)
+
+/** 一层的一行：真文件 = 大小 + k；假文件 = 大小（可改）+ k（可超过 n） */
+function levelRow(lv: LevelRow, idx: number): HTMLElement {
+  const isFake = lv.kind === 'fake'
+  const row = el('div', `lv-row${isFake ? ' is-fake' : ''}`)
+  row.append(el('span', 'lv-idx', String(idx + 1)), el('span', 'lv-name', lv.name))
+  // 真文件的大小是既成事实，直接显示；假文件的大小可编辑，只留输入框
+  if (!isFake) row.append(el('span', 'lv-size', fmtSize(lv.size)))
+
+  if (isFake) {
+    const sizeIn = document.createElement('input')
+    sizeIn.type = 'number'
+    sizeIn.className = 'lv-size-in'
+    sizeIn.min = '1'
+    sizeIn.value = String(Math.max(1, Math.round(lv.size / 1024)))
+    sizeIn.title = '假文件大小（KB），默认取真实文件的均值并随机浮动'
+    sizeIn.addEventListener('input', () => {
+      const kb = Number(sizeIn.value)
+      if (Number.isFinite(kb) && kb > 0) {
+        lv.size = Math.max(64, Math.round(kb * 1024))
+        lv.autoSize = false // 用户改过就不再跟随统计值
+      }
+    })
+    row.append(el('label', 'lv-cell', '大小 ', sizeIn, ' KB'))
+  }
+
+  const kIn = document.createElement('input')
+  kIn.type = 'number'
+  kIn.className = 'lv-k-in'
+  kIn.min = '2'
+  kIn.max = String(isFake ? MAX_SHARES : nShares)
+  kIn.value = String(lv.k)
+  kIn.title = isFake
+    ? '这一层永远解不开；可以设到 n 以上，那就连凑都凑不齐'
+    : '这一层至少需要多少片才能解开（≤ n）'
+  // 假层的 k 允许超过 n：那意味着这套分片永远凑不齐它。
+  // n 不写进多层密文，所以恢复端没法自己判断，只能在拆分端把话说明白。
+  let overHint: HTMLElement | null = null
+  if (isFake) {
+    overHint = el('span', 'lv-over', '> n')
+    overHint.hidden = lv.k <= nShares
+    overHint.title = `整套只拆成 ${nShares} 片，这一层要的片数超过总数，永远凑不齐`
+    kOver.set(lv, overHint)
+  }
+  const syncOver = () => {
+    if (!overHint) return
+    overHint.hidden = lv.k <= nShares
+    overHint.title = `整套只拆成 ${nShares} 片，这一层要的片数超过总数，永远凑不齐`
+  }
+  kIn.addEventListener('input', () => {
+    const v = Number(kIn.value)
+    if (Number.isFinite(v)) lv.k = clampK(v, isFake ? MAX_SHARES : nShares)
+    if (isFake) fakeKDirty = true
+    syncOver()
+    refreshSplitBtn()
+  })
+  kIn.addEventListener('blur', () => { kIn.value = String(lv.k) })
+  kInputs.set(lv, kIn)
+  row.append(el('label', 'lv-cell lv-k', 'k ', kIn))
+  if (overHint) row.append(overHint)
+
+  const del = el('button', 'btn share-btn lv-del', '×') as HTMLButtonElement
+  del.type = 'button'
+  del.title = isFake ? '移除假文件层（重新允许添加文件）' : '移除这一层'
+  del.addEventListener('click', () => {
+    levels = levels.filter((l) => l !== lv)
+    kInputs.delete(lv)
+    kOver.delete(lv)
+    if (isFake) sealed = false
+    if (levels.length === 0) {
+      $('dropSplit').classList.remove('has-file')
+      $('dropSplitText').textContent = '拖文件到这里，或点击选择（可多选）'
+    }
+    renderLevels()
+  })
+  row.append(del)
+  return row
+}
+
+function renderLevels(): void {
+  const list = $('levelList')
+  list.textContent = ''
+  kInputs.clear()
+  kOver.clear()
+  list.hidden = levels.length === 0
+  levels.forEach((lv, i) => {
+    if (lv.kind === 'real') list.append(levelRow(lv, i))
+  })
+
+  $('nRow').hidden = levels.length === 0
+  $('levelMore').hidden = levels.length === 0 || sealed
+  $('levelHint').hidden = levels.length === 0
+
+  const f = fakeLevel()
+  const box = $('fakeBox')
+  box.hidden = !f
+  const fakeList = $('fakeList')
+  fakeList.textContent = ''
+  if (f) fakeList.append(levelRow(f, levels.length - 1))
+
+  syncFakeUi()
   refreshSplitBtn()
 }
 
-const fileSplitInput = bindDrop('dropSplit', false, (files) => {
-  if (files[0]) showSplitFile(files[0])
+/** 密钥串对齐目标：一片里一共几组 k:v（真层 + 假层 + 诱饵） */
+function targetKv(): number {
+  const chain = levels.length
+  // 对齐是假文件层的配套功能：没加假层就原样输出，不做任何补位
+  if (!fakeLevel()) return chain
+  if (fakeAlign === '256') return Math.max(256, chain)
+  if (fakeAlign === '32') return chain >= 32 ? Math.max(256, chain) : 32
+  return Math.max(fakeCustom, chain)
+}
+
+function syncFakeUi(): void {
+  const f = fakeLevel()
+  $<HTMLInputElement>('fakeCount').hidden = fakeAlign !== 'custom'
+  const warn = $('fakeWarn')
+  // 只有"自定义"是实验性的：32 / 256 是固定档位，跑过完整测试
+  if (fakeAlign === 'custom') {
+    const total = targetKv()
+    // 每组 = 32 字节 y → base64 ≈ 44 字符，再加 ":k" 前缀；坐标只写一次
+    const perShare = total * 48 + String(nShares).length + 8
+    warn.hidden = false
+    warn.textContent = `⚠️ 自定义对齐是实验性功能，未经过完整测试：一片会带 ${total.toLocaleString()} 组密钥材料，约 ${fmtSize(perShare)}。`
+  } else {
+    warn.hidden = true
+  }
+  if (!f) {
+    $('fakeSummary').textContent = ''
+    return
+  }
+  const total = targetKv()
+  const pad = Math.max(0, total - levels.length)
+  $('fakeSummary').textContent =
+    `密钥串 ${total.toLocaleString()} 组：真 ${realLevels().length} · 假 1 · 诱饵 ${pad.toLocaleString()}`
+}
+
+/** 加入唯一的假文件层：必定最后一层，之后不能再加文件 */
+function addFake(): void {
+  if (sealed || levels.length === 0) return
+  const reals = realLevels()
+  const stats = sizeStats(reals.map((l) => l.size))
+  levels.push({
+    kind: 'fake',
+    name: FAKE_NAME,
+    size: randSize(stats),
+    k: fakeK(reals.map((l) => l.k), nShares),
+    autoSize: true,
+  })
+  sealed = true
+  fakeKDirty = false
+  renderLevels()
+}
+
+/** 把假层的大小与 k 拨回默认值（用户手改过才需要） */
+function resetFake(): void {
+  const f = fakeLevel()
+  if (!f) return
+  const reals = realLevels()
+  f.size = randSize(sizeStats(reals.map((l) => l.size)))
+  f.autoSize = true
+  f.k = fakeK(reals.map((l) => l.k), nShares)
+  fakeKDirty = false
+  renderLevels()
+}
+
+$<HTMLButtonElement>('btnAddFake').addEventListener('click', addFake)
+
+$<HTMLSelectElement>('fakeAlign').addEventListener('change', (e) => {
+  fakeAlign = (e.target as HTMLSelectElement).value as typeof fakeAlign
+  syncFakeUi()
 })
 
-const inK = $<HTMLInputElement>('inK')
-const inN = $<HTMLInputElement>('inN')
+$<HTMLInputElement>('fakeCount').addEventListener('change', (e) => {
+  const v = Math.round(Number((e.target as HTMLInputElement).value))
+  if (Number.isFinite(v) && v >= 2) fakeCustom = Math.min(4096, v)
+  syncFakeUi()
+})
 
-function readKn(): { k: number; n: number } | null {
-  const k = Math.round(Number(inK.value))
-  const n = Math.round(Number(inN.value))
-  if (!Number.isFinite(k) || !Number.isFinite(n) || k < 2 || n < 2 || n > MAX_SHARES || k > n) return null
-  return { k, n }
-}
+$<HTMLButtonElement>('btnApplyFake').addEventListener('click', resetFake)
 
 function refreshSplitBtn(): void {
-  $<HTMLButtonElement>('btnSplit').disabled = !splitFile || !readKn()
+  const ok =
+    levels.length > 0 &&
+    realLevels().every((l) => l.file && l.k >= 2 && l.k <= nShares) &&
+    (fakeLevel()?.k ?? 2) >= 2
+  $<HTMLButtonElement>('btnSplit').disabled = !ok
 }
 
-// k/n 联动：调高 k 时 n 跟随到 k；调低 n 时 k 跟随到 n（恒保证 2 ≤ k ≤ n ≤ MAX_SHARES）
-inK.addEventListener('input', () => {
-  const k = Math.round(Number(inK.value))
-  if (Number.isFinite(k)) {
-    const kc = Math.min(MAX_SHARES, Math.max(2, k))
-    if (String(kc) !== inK.value) inK.value = String(kc)
-    if (Number(inN.value) < kc) inN.value = String(kc)
-  }
-  refreshSplitBtn()
-})
-inN.addEventListener('input', () => {
-  const n = Math.round(Number(inN.value))
-  if (Number.isFinite(n)) {
-    const nc = Math.min(MAX_SHARES, Math.max(2, n))
-    if (String(nc) !== inN.value) inN.value = String(nc)
-    if (Number(inK.value) > nc) inK.value = String(nc)
-  }
-  refreshSplitBtn()
-})
 
 // ===== 产物命名（段式按钮，本地记住上次选择）=====
 
@@ -334,9 +562,10 @@ $<HTMLInputElement>('otsCheck').addEventListener('change', (e) => {
   try { localStorage.setItem('shamir-ots', (e.target as HTMLInputElement).checked ? '1' : '0') } catch { /* ignore */ }
 })
 
-/** 按命名选项生成产物词干（不含扩展名） */
+/** 按命名选项生成产物词干（不含扩展名）；以第 1 层的真实文件为基准 */
 function productStem(): string {
-  const base = splitFile ? baseName(splitFile.name) : 'file'
+  const first = realLevels()[0]
+  const base = first ? baseName(first.name) : 'file'
   switch (nameMode()) {
     case 'date': {
       const d = new Date()
@@ -358,6 +587,14 @@ interface SplitResult {
   stem: string
   ciphertext: Uint8Array
   shareTexts: string[]
+  /** 密钥串里每一组的 k（真 + 假 + 诱饵） */
+  ks: number[]
+  /** 有密文层的组数（真 + 假） */
+  chain: number
+  /** 真实层数 / 假层数 / 诱饵组数 */
+  realCount: number
+  fakeCount: number
+  padCount: number
 }
 
 let splitResult: SplitResult | null = null
@@ -366,13 +603,17 @@ const splitRun = new Run('runLog', 'runProg', [
   {
     disable: () => {
       $<HTMLButtonElement>('btnSplit').disabled = true
-      inK.disabled = inN.disabled = true
+      $<HTMLButtonElement>('btnAddMore').disabled = true
+      $<HTMLButtonElement>('btnAddFake').disabled = true
+      $<HTMLButtonElement>('btnApplyFake').disabled = true
       $<HTMLInputElement>('otsCheck').disabled = true
       fileSplitInput.disabled = true
       $('dropSplit').classList.add('is-disabled')
     },
     restore: () => {
-      inK.disabled = inN.disabled = false
+      $<HTMLButtonElement>('btnAddMore').disabled = false
+      $<HTMLButtonElement>('btnAddFake').disabled = false
+      $<HTMLButtonElement>('btnApplyFake').disabled = false
       $<HTMLInputElement>('otsCheck').disabled = false
       fileSplitInput.disabled = false
       $('dropSplit').classList.remove('is-disabled')
@@ -381,88 +622,238 @@ const splitRun = new Run('runLog', 'runProg', [
   },
 ])
 
+/** 一层加密前的明文材料 */
+interface LevelPayload {
+  name: string
+  /** 原始长度（真 = 文件长度；假 = 乱码长度） */
+  origSize: number
+  stored: Uint8Array
+  algo: number
+  hash: Uint8Array
+  ots: Uint8Array | null
+  mime: string
+  /** AES 加密用的密钥 */
+  key: Uint8Array
+  /** 参与 Shamir 的密钥；假层故意与 key 不同，所以凑够 k 片也解不开 */
+  splitKey: Uint8Array
+}
+
+function randomGarbage(n: number): Uint8Array {
+  const out = new Uint8Array(n)
+  // getRandomValues 单次上限 65536 字节
+  for (let off = 0; off < n; off += 65536) crypto.getRandomValues(out.subarray(off, Math.min(n, off + 65536)))
+  return out
+}
+
 $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
-  const f = splitFile
-  const kn = readKn()
-  if (!f || !kn) return
-  const { k, n } = kn
   const run = splitRun
+  const plan = levels.slice()
+  if (plan.length === 0) return
+  const chain = plan.length
+  // 密钥串里除了真层与假层，还要按"对齐档位"补一批诱饵组
+  const total = targetKv()
+  const padCount = Math.max(0, total - chain)
+  const ksChain = plan.map((l) => l.k)
+  const ksAll = [...ksChain, ...padKs(ksChain, total, realLevels().map((l) => l.k))]
+  const n = nShares
   run.begin()
   try {
-    run.line('读取文件…')
-    run.prog(5)
-    const fileBytes = new Uint8Array(await f.arrayBuffer())
+    if (realLevels().some((l) => l.k > n)) throw new Error('有真文件层的 k 超过总片数 n')
 
-    run.line(`计算 SHA-256（${fmtSize(f.size)}）…`)
-    run.prog(15)
-    const fileHash = await sha256(fileBytes)
-    run.line(`SHA-256 = ${toHex(fileHash)}`, 'lg-ok')
+    // 分片文本体积预估：一组 = base64(32) + ":k" 前缀，坐标只写一次
+    const unit = 32
+    const estText = n * (total * unit * (4 / 3) + total * 4)
+    if (estText > 256 * 1024 * 1024)
+      throw new Error(
+        `这个组合会生成约 ${fmtSize(estText)} 的分片文本，浏览器撑不住；请降低 n、层数或对齐档位`,
+      )
+    if (estText > 32 * 1024 * 1024)
+      run.line(`⚠️ 分片文本预计 ${fmtSize(estText)}，生成会偏慢`, 'lg-warn')
 
-    // OTS 存证（唯一可能联网的一步，失败不阻断主流程）
-    let ots: Uint8Array | null = null
-    if ($<HTMLInputElement>('otsCheck').checked) {
-      run.line('OTS：向公共日历提交哈希（联网，最长等 20s）…')
-      run.indet()
-      try {
-        ots = await otsStamp(fileHash)
-        run.line(`OTS：回执已收到（${ots.length} 字节），将藏进密文`, 'lg-ok')
-      } catch (e) {
-        run.line(`OTS：提交失败（${e instanceof Error ? e.message : e}），已跳过，不影响分片`, 'lg-warn')
+    // 密文是嵌套的：总大小 ≈ 各层明文之和（假文件只有一层，诱饵不带数据）。
+    const estPlain = plan.reduce((a, l) => a + l.size, 0)
+    if (estPlain > 2 * 1024 ** 3)
+      throw new Error(`各层明文合计约 ${fmtSize(estPlain)}，密文会长到同等量级，浏览器撑不住；请减少层数或假文件大小`)
+    if (estPlain > 256 * 1024 ** 2)
+      run.line(`⚠️ 各层明文合计 ${fmtSize(estPlain)}，密文也会接近这个大小`, 'lg-warn')
+
+    const mulmods = n * plan.reduce((a, l) => a + Math.min(l.k, n) - 1, 0)
+    run.line(
+      `${chain} 层（真 ${realLevels().length} · 假 ${plan.length - realLevels().length}）+ 诱饵 ${padCount} 组 · n=${n} · 预计 ${mulmods.toLocaleString()} 次模乘`,
+    )
+    if (mulmods > 2e7) run.line(`⚠️ 计算量偏大，可能要几十秒到几分钟，页面可以继续滚动`, 'lg-warn')
+
+    // ---------- 逐层准备明文 ----------
+    const from = 8
+    const to = 55
+    const payloads: LevelPayload[] = []
+    for (let i = 0; i < chain; i++) {
+      const lv = plan[i]!
+      const pct = from + ((to - from) * i) / chain
+      if (lv.kind === 'real') {
+        const f = lv.file!
+        run.line(`[${i + 1}/${chain}] ${f.name}（${fmtSize(f.size)}）读取…`)
+        run.prog(pct)
+        const bytes = new Uint8Array(await f.arrayBuffer())
+        const hash = await sha256(bytes)
+
+        let ots: Uint8Array | null = null
+        if ($<HTMLInputElement>('otsCheck').checked) {
+          run.line(`[${i + 1}/${chain}] OTS：提交哈希到公共日历（联网，最长 20s）…`)
+          run.indet()
+          try {
+            ots = await otsStamp(hash)
+          } catch (e) {
+            run.line(`OTS 提交失败（${e instanceof Error ? e.message : e}），已跳过`, 'lg-warn')
+          }
+        }
+
+        run.line(`[${i + 1}/${chain}] 压缩（${ALGO_LABEL[currentAlgo()]}）…`)
+        run.prog(pct + (to - from) / chain / 3)
+        const packed = await compressData(bytes, currentAlgo())
+        run.line(
+          `[${i + 1}/${chain}] ${fmtSize(bytes.length)} → ${fmtSize(packed.bytes.length)}（${packed.note}）`,
+          packed.algo === ALGO.NONE ? 'lg-warn' : 'lg-ok',
+        )
+        const key = randomFieldBytes()
+        payloads.push({
+          name: f.name,
+          origSize: f.size,
+          stored: packed.bytes,
+          algo: packed.algo,
+          hash,
+          ots,
+          mime: f.type,
+          key,
+          splitKey: key,
+        })
+      } else {
+        // 假文件层：结构与真文件一模一样（真 SHA-256、真的 AES-GCM 密文），
+        // 唯一的区别是"分片共享的密钥"和"加密用的密钥"不是同一把——
+        // 所以凑够 k 片能插值出密钥，但 AES-GCM 校验必然失败。
+        // 乱码天然压不动，直接按"不压缩"存，省掉一次无意义的压缩尝试。
+        run.line(`[${i + 1}/${chain}] 生成假文件（${fmtSize(lv.size)}）…`)
+        run.prog(pct)
+        const garbage = randomGarbage(Math.max(64, Math.round(lv.size)))
+        payloads.push({
+          name: lv.name,
+          origSize: garbage.length,
+          stored: garbage,
+          algo: ALGO.NONE,
+          hash: await sha256(garbage),
+          ots: null,
+          mime: '',
+          key: randomFieldBytes(),
+          splitKey: randomFieldBytes(),
+        })
       }
     }
 
-    run.line(`压缩（${ALGO_LABEL[currentAlgo()]}）…`)
-    run.prog(50)
-    const packed = await compressData(fileBytes, currentAlgo())
-    run.line(
-      `载荷：${fmtSize(fileBytes.length)} → ${fmtSize(packed.bytes.length)}（${packed.note}）`,
-      packed.algo === ALGO.NONE ? 'lg-warn' : 'lg-ok',
+    // 真实文件压缩后普遍比原文件小，假文件却不会被压缩。
+    // 自动大小的假文件按实际存储长度重新标定，免得密文长度一眼看出谁真谁假。
+    const autoFake = plan.find((l) => l.kind === 'fake' && l.autoSize)
+    if (autoFake) {
+      const stored = payloads.filter((_, i) => plan[i]!.kind === 'real').map((p) => p.stored.length)
+      if (stored.length > 0) {
+        const idx = plan.findIndex((l) => l === autoFake)
+        const stats = sizeStats(stored)
+        const size = randSize(stats)
+        const p = payloads[idx]!
+        if (size !== p.stored.length) {
+          p.stored = randomGarbage(size)
+          p.origSize = size
+          p.hash = await sha256(p.stored)
+          run.line(`[${idx + 1}/${chain}] 假文件大小按压缩后的真实长度标定为 ${fmtSize(size)}`)
+        }
+      }
+    }
+
+    // ---------- 反向建链：最深层先加密，逐层包进上一层 ----------
+    run.line('加密并串成密文链…')
+    run.prog(to)
+    let nested: Uint8Array | null = null
+    const now = Date.now()
+    for (let i = chain - 1; i >= 0; i--) {
+      const p = payloads[i]!
+      const iv = randomBytes(IV_LEN)
+      const chunks = [
+        { tag: TSPK.TAG.FILENAME, value: new TextEncoder().encode(p.name) },
+        { tag: TSPK.TAG.CREATED_AT, value: u64beBytes(now) },
+        { tag: TSPK.TAG.SHA256, value: p.hash },
+        ...(p.mime ? [{ tag: TSPK.TAG.MIME, value: new TextEncoder().encode(p.mime) }] : []),
+        { tag: TSPK.TAG.ALGO, value: new Uint8Array([p.algo]) },
+        ...(p.ots ? [{ tag: TSPK.TAG.OTS_RECEIPT, value: p.ots }] : []),
+        ...(nested ? [{ tag: TSPK.TAG.NEXT, value: nested }] : []),
+        { tag: TSPK.TAG.DATA, value: p.stored },
+      ]
+      const inner = tlvBuild(TSPK.MAGIC, TSPK.VERSION, chunks, { lastTag: TSPK.TAG.DATA })
+      const ciphertext = await aesEncrypt(p.key, iv, inner)
+      nested = tlvBuild(
+        TSCF.MAGIC,
+        TSCF.VERSION,
+        [
+          { tag: TSCF.TAG.K, value: u32beBytes(ksChain[i]!) },
+          // n 只写在单层密文的这一层上。多层链里绝不写：那会让"总片数"这种
+          // 全局信息出现在每一层，既多占字节，又与"每层只暴露自己 k"的设想相悖。
+          // 代价是恢复端拿不到 n，不能断言 k > n（见恢复流程里的 nHere）。
+          ...(chain === 1 ? [{ tag: TSCF.TAG.N, value: u32beBytes(n) }] : []),
+          { tag: TSCF.TAG.IV, value: iv },
+          { tag: TSCF.TAG.CIPHERTEXT, value: ciphertext },
+        ],
+        { lastTag: TSCF.LAST_TAG },
+      )
+      run.prog(to + ((60 - to) * (chain - i)) / chain)
+    }
+    const outer = nested!
+
+    run.line(`Shamir 分片（${total} 组，n=${n}）…`)
+    run.prog(62)
+    // 假层的 k 可能大于 n：多项式最多做到 n−1 次，文本里仍写用户设的 k
+    // （那样连凑都凑不齐）；诱饵位传 null，只写随机 y。
+    const secrets: (Uint8Array | null)[] = payloads.map((p) => p.splitKey)
+    for (let i = 0; i < padCount; i++) secrets.push(null)
+    const splitKs = [...plan.map((l) => Math.min(l.k, n)), ...ksAll.slice(chain)]
+    const { buffer, shareLen, count, xs } = await splitInWorker(
+      secrets,
+      n,
+      splitKs,
+      stageProgress(run, 62, 98, '分片'),
     )
+    const view = new Uint8Array(buffer)
+    const unitBytes = 32
+    const shareTexts: string[] = new Array(count)
+    for (let i = 0; i < count; i++) {
+      const base = i * shareLen
+      // x 只写一次：TSK1:x:k1:y1:k2:y2…
+      const parts: string[] = [SHARE_PREFIX, String(xs[i])]
+      for (let j = 0; j < total; j++) {
+        parts.push(String(ksAll[j]), toB64(view.subarray(base + j * unitBytes, base + (j + 1) * unitBytes)))
+      }
+      shareTexts[i] = parts.join(':')
+    }
 
-    run.line('生成 key 并 AES-256-GCM 加密…')
-    run.prog(68)
-    const key = randomFieldBytes() // 保证 < p，落在域外就丢弃重取
-    const iv = randomBytes(IV_LEN)
-
-    // 内层载荷包：原数据 + 元数据 + 存证，整体进密文
-    const innerChunks = [
-      { tag: TSPK.TAG.FILENAME, value: new TextEncoder().encode(f.name) },
-      { tag: TSPK.TAG.CREATED_AT, value: u64beBytes(Date.now()) },
-      { tag: TSPK.TAG.SHA256, value: fileHash },
-      ...(f.type ? [{ tag: TSPK.TAG.MIME, value: new TextEncoder().encode(f.type) }] : []),
-      { tag: TSPK.TAG.ALGO, value: new Uint8Array([packed.algo]) },
-      ...(ots ? [{ tag: TSPK.TAG.OTS_RECEIPT, value: ots }] : []),
-      { tag: TSPK.TAG.DATA, value: packed.bytes },
-    ]
-    const inner = tlvBuild(TSPK.MAGIC, TSPK.VERSION, innerChunks, { lastTag: TSPK.TAG.DATA })
-    const ciphertext = await aesEncrypt(key, iv, inner)
-
-    const outer = tlvBuild(
-      TSCF.MAGIC,
-      TSCF.VERSION,
-      [
-        { tag: TSCF.TAG.K, value: u32beBytes(k) },
-        { tag: TSCF.TAG.N, value: u32beBytes(n) },
-        { tag: TSCF.TAG.IV, value: iv },
-        { tag: TSCF.TAG.CIPHERTEXT, value: ciphertext },
-      ],
-      { lastTag: TSCF.LAST_TAG },
-    )
-
-    run.line(`Shamir 分片（k=${k}/n=${n}）…`)
-    run.prog(72)
-    const shares = await splitInWorker(key, n, k, stageProgress(run, 72, 99, '分片'))
-    const shareTexts = shares.map((s) => encodeShare(k, s))
-
-    splitResult = { stem: productStem(), ciphertext: outer, shareTexts }
-    run.line('完成 ✓', 'lg-ok')
+    splitResult = {
+      stem: productStem(),
+      ciphertext: outer,
+      shareTexts,
+      ks: ksAll,
+      chain,
+      realCount: realLevels().length,
+      fakeCount: chain - realLevels().length,
+      padCount,
+    }
+    run.line(`完成 ✓ 密文 ${fmtSize(outer.length)} · ${count.toLocaleString()} 片`, 'lg-ok')
     run.end()
-    renderSplitResult(f, k, n, ots)
+    renderSplitResult(payloads, otsAny(payloads))
   } catch (e) {
     run.line(`拆分失败：${e instanceof Error ? e.message : String(e)}`, 'lg-err')
     run.fail()
   }
 })
+
+function otsAny(payloads: LevelPayload[]): boolean {
+  return payloads.some((p) => p.ots)
+}
 
 function renderProductNames(): void {
   if (!splitResult) return
@@ -475,20 +866,25 @@ function renderProductNames(): void {
   })
 }
 
-function renderSplitResult(f: File, k: number, n: number, ots: Uint8Array | null): void {
+function renderSplitResult(payloads: LevelPayload[], hasOts: boolean): void {
   nameCustom.hidden = nameMode() !== 'custom'
+  const r = splitResult!
   const card = $('resultCard')
   card.hidden = false
-  $('ctName').textContent = `${splitResult!.stem}.tscf`
-  $('ctMeta').textContent = `${fmtSize(f.size)} → ${fmtSize(splitResult!.ciphertext.length)} · k=${k}/n=${n}`
+  $('ctName').textContent = `${r.stem}.tscf`
+  const totalOrig = payloads.reduce((a, p) => a + p.origSize, 0)
+  const chainKs = r.ks.slice(0, r.chain)
+  const kText = chainKs.length > 4 ? `${chainKs.slice(0, 3).join('/')}…/${chainKs[chainKs.length - 1]}` : chainKs.join('/')
+  $('ctMeta').textContent =
+    `${r.chain} 层（真 ${r.realCount} · 假 ${r.fakeCount}）+ 诱饵 ${r.padCount} 组 · 明文合计 ${fmtSize(totalOrig)} → 密文 ${fmtSize(r.ciphertext.length)} · k=${kText} · n=${nShares}`
 
   const box = $('otsBox')
-  if (ots) {
+  if (hasOts) {
     box.hidden = false
     box.innerHTML = ''
     const line = document.createElement('div')
     line.className = 'ots-line'
-    line.innerHTML = `<span class="ots-status pending">OTS 存证已提交</span><span>哈希已发送至公共日历，比特币锚定约需数小时；回执已藏进密文，恢复时自动显示。</span>`
+    line.innerHTML = `<span class="ots-status pending">OTS 存证已提交</span><span>哈希已发送至公共日历，比特币锚定约需数小时；回执藏进了对应层的密文，恢复时自动显示。</span>`
     box.appendChild(line)
   } else {
     box.hidden = true
@@ -509,7 +905,11 @@ function renderSplitResult(f: File, k: number, n: number, ots: Uint8Array | null
     idx.textContent = String(i + 1)
     const span = document.createElement('div')
     span.className = 'share-text'
-    span.textContent = text
+    // 多层时一条分片有一两 KB，列表里只给前缀 + 组数/长度摘要
+    span.textContent =
+      r.ks.length > 1
+        ? `${text.slice(0, 48)}…（${r.ks.length} 组 · ${text.length} 字符）`
+        : text
     const name = document.createElement('div')
     name.className = 'share-name'
     name.hidden = true
@@ -585,7 +985,6 @@ interface CtEntry {
 let ctEntries: CtEntry[] = []
 let activeCt: CtEntry | null = null
 const shareMap = new Map<number, ShareEntry>()
-let restoreOk: { name: string; data: Uint8Array } | null = null
 
 const SHARE_RE = /TSK\d+:/
 
@@ -602,7 +1001,7 @@ function importShareText(text: string): { added: number; errors: string[] } {
       if (!entry) continue
       recognized++
       const prev = shareMap.get(entry.index)
-      if (prev && (prev.k !== entry.k || !bytesEq(prev.payload, entry.payload))) {
+      if (prev && !sameLevels(prev.levels, entry.levels)) {
         errors.push(`第 ${entry.index} 号分片内容冲突，已保留原片`)
       } else if (!prev) {
         shareMap.set(entry.index, entry)
@@ -612,7 +1011,7 @@ function importShareText(text: string): { added: number; errors: string[] } {
       errors.push(err instanceof Error ? err.message : String(err))
     }
   }
-  if (recognized === 0) errors.push('没有识别到分片（格式应为 TSK1:k:base64…，一条一行）')
+  if (recognized === 0) errors.push('没有识别到分片（格式应为 TSK1:x:k:y…，一条一行）')
   return { added, errors }
 }
 
@@ -697,6 +1096,13 @@ function renderCtList(): void {
   }
 }
 
+/** 把一条分片重新拼成文本（列表展示 / 复制用） */
+function shareTextOf(s: ShareEntry): string {
+  const parts = [SHARE_PREFIX, String(s.index)]
+  for (const lv of s.levels) parts.push(String(lv.k), toB64(lv.payload))
+  return parts.join(':')
+}
+
 function renderShareList(): void {
   const list = $('shareMiniList')
   list.textContent = ''
@@ -705,7 +1111,7 @@ function renderShareList(): void {
   // 同上：几万片时逐行渲染会卡死，只画前 50 行，剩下用计数交代
   for (const s of shares.slice(0, SHARE_ROWS)) {
     const row = el('div', 'mini-row')
-    const text = encodeShare(s.k, s.payload)
+    const text = shareTextOf(s)
     const del = el('button', 'btn share-btn', '移除')
     del.type = 'button'
     del.addEventListener('click', () => {
@@ -713,9 +1119,11 @@ function renderShareList(): void {
       renderShareList()
       refreshRestoreBtn()
     })
+    const ks = s.levels.map((l) => l.k)
+    const kBrief = ks.length > 3 ? `${ks[0]}…${ks[ks.length - 1]}` : ks.join('/')
     row.append(
       el('span', 'mini-idx', `#${s.index}`),
-      el('span', 'mini-name', text.slice(0, 60) + (text.length > 60 ? '…' : '')),
+      el('span', 'mini-name', `${s.levels.length} 组密钥 · k=${kBrief} · ${text.length} 字符`),
       del,
     )
     list.append(row)
@@ -736,17 +1144,21 @@ function refreshRestoreBtn(): void {
     btn.disabled = true
     return
   }
-  const { k, n } = activeCt
   const shares = [...shareMap.values()]
-  const bad = shares.find((s) => s.k !== k)
+  // 第 1 层的 k 必须与最外层密文一致；更深层的 k 在链里逐层核对
+  const bad = shares.find((s) => s.levels[0]!.k !== activeCt!.k)
   if (bad) {
-    status.textContent = `⚠️ 有分片的 k=${bad.k} 与密文 k=${k} 不一致`
+    status.textContent = `⚠️ 有分片第 1 层 k=${bad.levels[0]!.k} 与密文 k=${activeCt.k} 不一致`
     btn.disabled = true
     return
   }
-  const nText = n != null ? `，n=${n}` : '，n 未记录'
-  status.textContent = `已导入 ${shares.length} 片（k=${k}${nText}${shares.length >= k ? '，够用 ✓' : `，还差 ${k - shares.length} 片`}）`
-  btn.disabled = shares.length < k
+  const slots = shares[0]?.levels.length ?? 0
+  // n 只有单层密文才记录；多层时链里根本没有这个字段，就别假装"未记录"
+  const nText = activeCt.n != null ? `，n=${activeCt.n}` : ''
+  status.textContent =
+    `已导入 ${shares.length} 片（每片 ${slots || '?'} 组密钥，k=${activeCt.k}${nText}` +
+    `${shares.length >= activeCt.k ? '，够用 ✓' : `，还差 ${activeCt.k - shares.length} 片`}）`
+  btn.disabled = shares.length < activeCt.k
 }
 
 const fileCtInput = bindDrop('dropCt', true, (files) => void ingestFiles(files))
@@ -815,54 +1227,146 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
   const run = restoreRun
   run.begin()
   try {
-    run.line('解析分片…')
-    run.prog(10)
     const shares = [...shareMap.values()].sort((a, b) => a.index - b.index)
-    checkConsistency(shares, activeCt!.k)
+    const ks = checkConsistency(shares, activeCt!.k)
+    // 分片里的组数 ≠ 层数：多出来的是诱饵（没有对应密文）
+    const slots = ks.length
+    run.line(`分片自洽：${shares.length} 片 · 每片 ${slots} 组密钥 · k=${ks.slice(0, 6).join('/')}${slots > 6 ? '…' : ''}`)
 
-    run.line('重放 Shamir 合并密钥…')
-    run.prog(15)
-    const key = await combineInWorker(
-      shares.slice(0, shares[0]!.k).map((s) => s.payload),
-      stageProgress(run, 15, 70, '插值'),
-    )
+    const card = $('restoreCard')
+    const list = $('restoreList')
+    list.textContent = ''
+    card.hidden = false
+    const more = $('restoreMore')
+    more.hidden = true
+    more.textContent = ''
 
-    run.line(`AES-256-GCM 解密（${fmtSize(activeCt!.bytes.length)}）…`)
-    run.prog(78)
-    const outer = tlvParse(TSCF.MAGIC, activeCt!.bytes)
-    const iv = outer.chunks.get(TSCF.TAG.IV)
-    const ct = outer.chunks.get(TSCF.TAG.CIPHERTEXT)
-    if (!iv || iv.length !== IV_LEN) throw new Error('密文缺少 IV 或长度不对')
-    if (!ct) throw new Error('密文缺少 CIPHERTEXT 块')
-    const inner = await aesDecrypt(key, iv, ct)
+    const band = (92 - 8) / slots
+    let bytes = activeCt!.bytes
+    let unlocked = 0
+    /** 真正取到密文的层数（诱饵没有密文，不计入） */
+    let chainLayers = 0
+    /** 链走到哪儿停的：locked = 片不够，fake = 假层，end = 没有下一层 */
+    let endedBy: 'locked' | 'fake' | 'end' | 'slots' = 'slots'
 
-    run.line('解析载荷包…')
-    run.prog(86)
-    const pack = tlvParse(TSPK.MAGIC, inner)
-    if (pack.version !== TSPK.VERSION) throw new Error(`不支持的载荷包版本 v${pack.version}`)
-    const stored = pack.chunks.get(TSPK.TAG.DATA)
-    if (!stored) throw new Error('载荷包缺少 DATA 块')
-    const algo = pack.chunks.get(TSPK.TAG.ALGO)?.[0] ?? ALGO.NONE
-    let data = stored
-    if (algo !== ALGO.NONE) {
-      run.line(`解压（${ALGO_LABEL[algo] ?? `算法 ${algo}`}，${fmtSize(stored.length)}）…`)
-      run.prog(90)
-      data = await decompressData(stored, algo)
+    for (let j = 0; j < slots; j++) {
+      const tscf = tlvParse(TSCF.MAGIC, bytes)
+      chainLayers++
+      const kBytes = tscf.chunks.get(TSCF.TAG.K)
+      const kHere = kBytes ? beBytesToUint(kBytes) : 0
+      // n 只可能来自**单层**密文；多层链里根本没有这个字段（拆分时就不写）。
+      // 缺失就是"不知道这套一共多少片"，绝不能拿当前导入的片数冒充 ——
+      // 用户完全可能只导入了 n 片里的 3 片，那样会把"还差几片"误报成"永远凑不齐"。
+      const nBytes = tscf.chunks.get(TSCF.TAG.N)
+      const nHere = nBytes ? beBytesToUint(nBytes) : null
+      if (kHere !== ks[j])
+        throw new Error(`第 ${j + 1} 层密文的 k=${kHere} 与分片 k=${ks[j]} 不一致，可能拿错了分片`)
+
+      // 不够就停：更深层套在这一层里面，没有这一层的密钥连字节都拿不到
+      if (shares.length < kHere) {
+        // 只有"密文自己声明了总片数"且 k 超过它，才是确凿的永远凑不齐
+        const impossible = nHere !== null && kHere > nHere
+        list.append(lockedRow(j + 1, kHere, shares.length, impossible ? nHere : null))
+        more.hidden = false
+        more.textContent = impossible
+          ? `第 ${j + 1} 层写着要 ${kHere} 片，可这套密文只拆成 ${nHere} 片：永远凑不齐，这是假层，密文到这儿就结束了。`
+          : `第 ${j + 1} 层起需要至少 ${kHere} 片才能揭开，当前 ${shares.length} 片。凑够后重新点「恢复文件」就能接着往下解锁。` +
+            (nHere === null ? '（多层密文不记录总片数，这里只能按你导入的片数计算；如果这层本就是假层，k 可能被故意设得比总片数还大。）' : '')
+        endedBy = 'locked'
+        break
+      }
+
+      run.line(`第 ${j + 1} 层：用 ${kHere} 片插值…`)
+      run.prog(8 + band * j)
+      const slice = shares.slice(0, kHere)
+      const key = await combineInWorker(
+        slice.map((s) => s.levels[j]!.payload),
+        slice.map((s) => s.index),
+        stageProgress(run, 8 + band * j, 8 + band * (j + 0.65), `第 ${j + 1} 层`),
+      )
+
+      const iv = tscf.chunks.get(TSCF.TAG.IV)
+      const ct = tscf.chunks.get(TSCF.TAG.CIPHERTEXT)
+      if (!iv || iv.length !== IV_LEN) throw new Error(`第 ${j + 1} 层密文缺少 IV 或长度不对`)
+      if (!ct) throw new Error(`第 ${j + 1} 层密文缺少 CIPHERTEXT 块`)
+
+      // 假层：插值出来的是"另一把密钥"，AES-GCM 校验必然不过。
+      // 这不是程序出错，所以单独给一行说明，而不是抛异常。
+      let inner: Uint8Array
+      try {
+        inner = await aesDecrypt(key, iv, ct)
+      } catch {
+        list.append(fakeRow(j + 1, kHere))
+        more.hidden = false
+        more.textContent =
+          `第 ${j + 1} 层用 ${kHere} 片解出来的密钥打不开它：它是假层（拆分时特意用另一把密钥加密）。` +
+          (unlocked > 0 ? `前 ${unlocked} 个文件不受影响。` : '') +
+          '如果你确信这层本应是真文件，那更可能是分片被改动过。'
+        endedBy = 'fake'
+        break
+      }
+
+      const pack = tlvParse(TSPK.MAGIC, inner)
+      if (pack.version !== TSPK.VERSION) throw new Error(`不支持的载荷包版本 v${pack.version}`)
+      const stored = pack.chunks.get(TSPK.TAG.DATA)
+      if (!stored) throw new Error(`第 ${j + 1} 层载荷包缺少 DATA 块`)
+      const algo = pack.chunks.get(TSPK.TAG.ALGO)?.[0] ?? ALGO.NONE
+      let data = stored
+      if (algo !== ALGO.NONE) {
+        run.line(`第 ${j + 1} 层解压（${ALGO_LABEL[algo] ?? `算法 ${algo}`}，${fmtSize(stored.length)}）…`)
+        data = await decompressData(stored, algo)
+      }
+
+      const nameBytes = pack.chunks.get(TSPK.TAG.FILENAME)
+      const createdAtBytes = pack.chunks.get(TSPK.TAG.CREATED_AT)
+      const createdAt = createdAtBytes ? beBytesToU64(createdAtBytes) : null
+      const name = nameBytes ? new TextDecoder().decode(nameBytes) : defaultName(createdAt)
+
+      // SHA-256 完整性：假文件也带自己那份（对乱码算的），所以照样能对上，
+      // 不会因为"校验失败"提前暴露它是假的
+      const expect = pack.chunks.get(TSPK.TAG.SHA256)
+      const actual = await sha256(data)
+      const hashOk = expect ? toHex(expect) === toHex(actual) : null
+
+      const otsBytes = pack.chunks.get(TSPK.TAG.OTS_RECEIPT) ?? null
+      const item = levelCard({
+        index: j + 1,
+        name,
+        data,
+        createdAt,
+        hashOk,
+        hash: actual,
+        ots: otsBytes,
+      })
+      list.append(item)
+      if (otsBytes) await renderOtsInto(item.querySelector('.ots-box') as HTMLElement, otsBytes, actual)
+
+      unlocked++
+      run.prog(8 + band * (j + 0.9))
+
+      const next = pack.chunks.get(TSPK.TAG.NEXT)
+      if (!next) {
+        endedBy = 'end'
+        break
+      }
+      bytes = next
     }
-    const nameBytes = pack.chunks.get(TSPK.TAG.FILENAME)
-    const createdAtBytes = pack.chunks.get(TSPK.TAG.CREATED_AT)
-    const createdAt = createdAtBytes ? beBytesToU64(createdAtBytes) : null
-    const name = nameBytes ? new TextDecoder().decode(nameBytes) : defaultName(createdAt)
 
-    // SHA-256 完整性
-    const expect = pack.chunks.get(TSPK.TAG.SHA256)
-    const actual = await sha256(data)
-    const hashOk = expect ? toHex(expect) === toHex(actual) : null
+    // 链走完后，剩下的组都是诱饵——说清楚它们为什么存在，免得用户以为丢数据了
+    const rest = slots - chainLayers
+    if ((endedBy === 'end' || endedBy === 'fake') && rest > 0) {
+      list.append(
+        el(
+          'div',
+          'hint',
+          `另外 ${rest} 组密钥是诱饵：没有对应的密文，只是把密钥串撑到固定组数，让人看不出真实层数。`,
+        ),
+      )
+    }
 
-    restoreOk = { name, data }
-    run.line('完成 ✓', 'lg-ok')
+    run.line(`完成 ✓ 解锁 ${unlocked} 层`, 'lg-ok')
     run.end()
-    await renderRestore(pack, data, name, hashOk, actual)
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   } catch (e) {
     run.line(`恢复失败：${e instanceof Error ? e.message : String(e)}`, 'lg-err')
     run.fail()
@@ -876,118 +1380,182 @@ function defaultName(createdAt: number | null): string {
   return `${ymd}.bin`
 }
 
-async function renderRestore(
-  pack: { chunks: Map<number, Uint8Array> },
-  data: Uint8Array,
-  name: string,
-  hashOk: boolean | null,
-  actualHash: Uint8Array,
-): Promise<void> {
-  const card = $('restoreCard')
-  card.hidden = false
-  $('restName').textContent = name
-  const createdAtBytes = pack.chunks.get(TSPK.TAG.CREATED_AT)
-  const createdAt = createdAtBytes ? beBytesToU64(createdAtBytes) : null
-  // CREATED_AT / MIME 均为可选：缺失时只留白，不报错
-  $('restMeta').textContent = `${fmtSize(data.length)}${createdAt ? ` · ${new Date(createdAt).toLocaleString()}` : ' · 时间未记录'}`
-  $('hashLine').textContent = `SHA-256：${toHex(actualHash)}${hashOk === false ? '\n⚠️ 与打包时记录的哈希不一致，文件可能被篡改！' : ''}`
+/** 已解锁的一层 */
+function levelCard(r: {
+  index: number
+  name: string
+  data: Uint8Array
+  createdAt: number | null
+  hashOk: boolean | null
+  hash: Uint8Array
+  ots: Uint8Array | null
+}): HTMLElement {
+  const box = el('div', 'rest-item')
+  const head = el('div', 'rest-head')
+  head.append(el('span', 'rest-lv', `第 ${r.index} 层`), el('span', 'prod-name', r.name))
+  box.append(head)
+  box.append(
+    el('div', 'prod-meta', `${fmtSize(r.data.length)}${r.createdAt ? ` · ${new Date(r.createdAt).toLocaleString()}` : ' · 时间未记录'}`),
+  )
+  box.append(
+    el(
+      'div',
+      'hash-line',
+      `SHA-256：${toHex(r.hash)}${r.hashOk === false ? '\n⚠️ 与打包时记录的哈希不一致，文件可能被篡改！' : ''}`,
+    ),
+  )
+  const otsBox = el('div', 'ots-box')
+  otsBox.hidden = true
+  box.append(otsBox)
 
-  // OTS：回执在内层，解密后才可见；初始消息 = 原文件哈希，重放 ops 得到被锚定摘要。
-  // 检测到回执就自动后台查询（不阻塞文件下载）：pending → 查日历升级；已锚定 → 直接链上验证。
-  const otsBytes = pack.chunks.get(TSPK.TAG.OTS_RECEIPT)
-  const box = $('otsRestBox')
-  if (otsBytes) {
-    box.hidden = false
-    box.textContent = ''
-    try {
-      const ots = await parseOts(otsBytes, actualHash)
-      const pending = ots.attestations.filter((a) => a.kind === 'pending') as { kind: 'pending'; uri: string; digest: Uint8Array | null }[]
-      const anchors = ots.attestations.filter((a) => a.kind === 'bitcoin') as { kind: 'bitcoin'; height: number; digest: Uint8Array | null }[]
-
-      const spinner = () => {
-        const s = el('span', 'spinner')
-        s.setAttribute('aria-hidden', 'true')
-        return s
-      }
-      const status = el('div', 'ots-line')
-      if (anchors.length > 0) {
-        status.append(
-          el('span', 'ots-status ok', `OTS 已锚定 Bitcoin 区块 #${anchors.map((a) => a.height).join(' / #')}`),
-          spinner(),
-          el('span', '', '正在比对区块链…'),
-        )
-      } else if (pending.length > 0) {
-        status.append(
-          el('span', 'ots-status pending', 'OTS 待锚定'),
-          spinner(),
-          el('span', '', '拆分时已提交日历，正在后台查询最新状态…'),
-        )
-      } else {
-        status.append(el('span', 'ots-status pending', 'OTS 回执存在，但未识别出 attestation'))
-      }
-      box.append(status)
-
-      // 后台查询：完成后原地更新状态行（成功/失败都不打扰用户下载文件）
-      void (async () => {
-        try {
-          let toVerify: { height: number; digest: Uint8Array | null }[] = anchors
-          if (anchors.length === 0) {
-            // 日历升级查询：拿到含 BitcoinAttestation 的新回执再上链验证
-            const upgraded = await Promise.all(pending.map((p) => upgradePending(p)))
-            toVerify = upgraded.flatMap((u) =>
-              u.attestations.filter((a) => a.kind === 'bitcoin'),
-            ) as { kind: 'bitcoin'; height: number; digest: Uint8Array | null }[]
-            if (toVerify.length === 0) {
-              status.textContent = ''
-              status.append(
-                el('span', 'ots-status pending', 'OTS 待锚定'),
-                el('span', '', `已查日历（${pending.map((p) => p.uri).join('、')}）：尚未上链，比特币锚定通常需 1~3 小时，之后重新恢复本密文可自动再查。`),
-              )
-              return
-            }
-          }
-          const results = await Promise.all(
-            toVerify.map((a) => verifyAnchorOnline({ height: a.height, digest: a.digest })),
-          )
-          const ok = results.some((r) => r.ok)
-          status.textContent = ''
-          status.append(
-            el('span', `ots-status ${ok ? 'ok' : 'pending'}`,
-              ok ? '✓ OTS 存证有效（区块链验证通过）' : '⚠️ OTS 上链但验证未通过，请警惕文件来源'),
-            ...results.map((r) =>
-              el('span', '', `#${r.height} @ ${new Date(r.blockTime).toLocaleString()}：${r.detail}`),
-            ),
-          )
-        } catch (e) {
-          status.textContent = ''
-          status.append(
-            el('span', 'ots-status pending', `OTS 待锚定（后台查询失败：${e instanceof Error ? e.message : String(e)}）`),
-            el('span', '', '公开日历通常未开放跨域读取，浏览器端多半只能拿到"待锚定"状态；可点「下载 ots 文件」交给官方工具（ots verify）复核。'),
-          )
-        }
-      })()
-
-      if (ots.degraded) {
-        box.append(el('div', 'ots-line', el('span', 'ots-status pending', '回执含未识别结构，以上仅部分解析；建议用官方验证器复核。')))
-      }
-    } catch (e) {
-      box.textContent = ''
-      box.append(el('div', 'ots-line', el('span', 'ots-status pending', `OTS 回执解析失败：${e instanceof Error ? e.message : String(e)}`)))
-    }
-  } else {
-    box.hidden = true
+  const row = el('div', 'dl-row')
+  const dl = el('button', 'btn btn-primary', '下载') as HTMLButtonElement
+  dl.type = 'button'
+  dl.addEventListener('click', () => download(r.name, r.data))
+  row.append(dl)
+  if (r.ots) {
+    // 包装成标准 DetachedTimestampFile，官方 ots 工具与 opentimestamps.org 可直接验证
+    const b = el('button', 'btn btn-ghost', '下载 ots 文件') as HTMLButtonElement
+    b.type = 'button'
+    b.addEventListener('click', () => download(`${r.name}.ots`, toDetachedOts(r.ots!, r.hash)))
+    row.append(b)
   }
-
-  $<HTMLButtonElement>('btnDlRest').onclick = () => restoreOk && download(restoreOk.name, restoreOk.data)
-  // 有 OTS 回执时，额外提供「下载 ots 文件」：包装成标准 DetachedTimestampFile，
-  // 官方 ots 工具与 opentimestamps.org 网页可直接验证
-  const otsBtn = $<HTMLButtonElement>('btnDlOts')
-  if (otsBytes) {
-    otsBtn.hidden = false
-    otsBtn.onclick = () => download(`${name}.ots`, toDetachedOts(otsBytes, actualHash))
-  } else {
-    otsBtn.hidden = true
-    otsBtn.onclick = null
-  }
-  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  box.append(row)
+  return box
 }
+
+/** 还没凑够片的那一层 */
+/**
+ * 还没凑够片的那一层。
+ * total 非 null = 密文自己声明了总片数（只有单层密文才有 N 字段），
+ * 此时 k > total 是确凿的"永远凑不齐"；否则只能说"还差几片"。
+ */
+function lockedRow(level: number, k: number, have: number, total: number | null): HTMLElement {
+  const box = el('div', 'rest-item is-locked')
+  box.append(
+    el('span', 'rest-lv', `第 ${level} 层`),
+    el(
+      'span',
+      'mini-meta',
+      total !== null
+        ? `🔒 需要 ${k} 片，这套密文只拆成 ${total} 片：永远凑不齐`
+        : `🔒 需要 ${k} 片，当前 ${have} 片（还差 ${k - have} 片）`,
+    ),
+  )
+  return box
+}
+
+/** 凑够片、密钥也插出来了，但解不开的那一层：假层 */
+function fakeRow(level: number, k: number): HTMLElement {
+  const box = el('div', 'rest-item is-locked is-fake-layer')
+  box.append(
+    el('span', 'rest-lv', `第 ${level} 层`),
+    el('span', 'mini-meta', `🔒 解密失败 · 假层（${k} 片插出来的密钥对不上）`),
+  )
+  return box
+}
+
+async function renderOtsInto(box: HTMLElement, otsBytes: Uint8Array, actualHash: Uint8Array): Promise<void> {
+  box.hidden = false
+  box.textContent = ''
+  try {
+    const ots = await parseOts(otsBytes, actualHash)
+    const pending = ots.attestations.filter((a) => a.kind === 'pending') as { kind: 'pending'; uri: string; digest: Uint8Array | null }[]
+    const anchors = ots.attestations.filter((a) => a.kind === 'bitcoin') as { kind: 'bitcoin'; height: number; digest: Uint8Array | null }[]
+
+    const spinner = () => {
+      const s = el('span', 'spinner')
+      s.setAttribute('aria-hidden', 'true')
+      return s
+    }
+    const status = el('div', 'ots-line')
+    // 只有白名单里（实测带 CORS 头）的日历才值得发请求；否则请求发出去也读不到响应，
+    // 纯粹白送一次外发。这类回执直接给"本地已校验、可交官方工具复核"的静态结论。
+    const queryable = pending.filter((p) => calendarHasCors(p.uri))
+    const hostOf = (uri: string) => {
+      try {
+        return new URL(uri).hostname
+      } catch {
+        return uri
+      }
+    }
+    if (anchors.length > 0) {
+      status.append(
+        el('span', 'ots-status ok', `OTS 已锚定 Bitcoin 区块 #${anchors.map((a) => a.height).join(' / #')}`),
+        spinner(),
+        el('span', '', '正在比对区块链…'),
+      )
+    } else if (queryable.length > 0) {
+      status.append(
+        el('span', 'ots-status pending', 'OTS 待锚定'),
+        spinner(),
+        el('span', '', '拆分时已提交日历，正在后台查询最新状态…'),
+      )
+    } else if (pending.length > 0) {
+      status.append(
+        el('span', 'ots-status pending', 'OTS 待锚定'),
+        el('span', '', `回执里的日历（${[...new Set(pending.map((p) => hostOf(p.uri)))].join('、')}）不允许浏览器跨域读取，因此没有做在线查询。回执本身已随密文一起存好，可用「下载 ots 文件」交给官方工具（ots verify）复核。`),
+      )
+    } else {
+      status.append(el('span', 'ots-status pending', 'OTS 回执存在，但未识别出 attestation'))
+    }
+    box.append(status)
+
+    // 没有可查的日历就直接收工，一次请求都不发
+    if (pending.length > 0 && queryable.length === 0) {
+      if (ots.degraded) box.append(el('div', 'hint', '回执里有暂不支持的 op/attestation，离线校验只走通了一部分。'))
+      return
+    }
+
+    // 后台查询：完成后原地更新状态行（成功/失败都不打扰用户下载文件）
+    void (async () => {
+      try {
+        let toVerify: { height: number; digest: Uint8Array | null }[] = anchors
+        if (anchors.length === 0) {
+          // 日历升级查询：只查白名单里的（外面已过滤掉不支持 CORS 的）
+          const upgraded = await Promise.all(queryable.map((p) => upgradePending(p)))
+          toVerify = upgraded.flatMap((u) =>
+            u.attestations.filter((a) => a.kind === 'bitcoin'),
+          ) as { kind: 'bitcoin'; height: number; digest: Uint8Array | null }[]
+          if (toVerify.length === 0) {
+            status.textContent = ''
+            status.append(
+              el('span', 'ots-status pending', 'OTS 待锚定'),
+              el('span', '', `已查日历（${queryable.map((p) => p.uri).join('、')}）：尚未上链，比特币锚定通常需 1~3 小时，之后重新恢复本密文可自动再查。`),
+            )
+            return
+          }
+        }
+        const results = await Promise.all(
+          toVerify.map((a) => verifyAnchorOnline({ height: a.height, digest: a.digest })),
+        )
+        const ok = results.some((r) => r.ok)
+        status.textContent = ''
+        status.append(
+          el('span', `ots-status ${ok ? 'ok' : 'pending'}`,
+            ok ? '✓ OTS 存证有效（区块链验证通过）' : '⚠️ OTS 上链但验证未通过，请警惕文件来源'),
+          ...results.map((r) =>
+            el('span', '', `#${r.height} @ ${new Date(r.blockTime).toLocaleString()}：${r.detail}`),
+          ),
+        )
+      } catch (e) {
+        status.textContent = ''
+        const noCors = e instanceof OtsNoCorsError
+        status.append(
+          el('span', 'ots-status pending', noCors
+            ? 'OTS 待锚定（该日历不支持浏览器跨域读取，已跳过在线查询）'
+            : `OTS 待锚定（后台查询失败：${e instanceof Error ? e.message : String(e)}）`),
+          el('span', '', '可点「下载 ots 文件」交给官方工具（ots verify）复核，那条路径不受浏览器跨域限制。'),
+        )
+      }
+    })()
+
+    if (ots.degraded) {
+      box.append(el('div', 'ots-line', el('span', 'ots-status pending', '回执含未识别结构，以上仅部分解析；建议用官方验证器复核。')))
+    }
+  } catch (e) {
+    box.textContent = ''
+    box.append(el('div', 'ots-line', el('span', 'ots-status pending', `OTS 回执解析失败：${e instanceof Error ? e.message : String(e)}`)))
+  }
+}
+

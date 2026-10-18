@@ -210,6 +210,37 @@ export async function otsStamp(fileDigest: Uint8Array, timeoutMs = 20000): Promi
   }
 }
 
+/**
+ * 能在浏览器里**读出响应**的日历白名单（响应必须带 Access-Control-Allow-Origin）。
+ *
+ * 2026-10-18 实测 OTS 公共池的几个日历：
+ *   a/b.pool.opentimestamps.org、alice/bob.btc.calendar.opentimestamps.org
+ *   POST /digest   → 200 + `Access-Control-Allow-Origin: *`（所以能提交）
+ *   GET  /timestamp/<hex> → 404/200 但**不带任何 CORS 头**（所以读不到）
+ * 即"能写入、不能读回"。这份名单因此是空的 —— 也就是默认不做任何自动查询，
+ * 连一次外发请求都不会发（顺带守住"无外发"的隐私底线）。
+ * 哪天某个日历补上了 CORS 头（或自建日历），把 hostname 加进来即可启用。
+ */
+const CORS_CALENDARS: readonly string[] = []
+
+/** 该日历不支持跨域读取：不是错误，只是浏览器端做不到，调用方应静默降级 */
+export class OtsNoCorsError extends Error {
+  readonly uri: string
+  constructor(uri: string) {
+    super('该日历不支持浏览器跨域读取')
+    this.name = 'OtsNoCorsError'
+    this.uri = uri
+  }
+}
+
+export function calendarHasCors(uri: string): boolean {
+  try {
+    return CORS_CALENDARS.includes(new URL(uri).hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
 /** 日历域名白名单：回执内的 URI 完全由文件内容控制，联网查询前必须校验，防内网探测/外发 */
 export function isAllowedCalendarUri(uri: string): boolean {
   try {
@@ -233,6 +264,8 @@ export async function upgradePending(
 ): Promise<OtsParse> {
   if (!p.digest) throw new Error('回执结构降级，无法确定查询摘要')
   if (!isAllowedCalendarUri(p.uri)) throw new Error(`回执内日历地址不受信任，已拒绝查询：${p.uri}`)
+  // 白名单外一律不查：请求发出去也读不到响应，白白暴露一次外发
+  if (!calendarHasCors(p.uri)) throw new OtsNoCorsError(p.uri)
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), timeoutMs)
   try {

@@ -40,19 +40,45 @@
       <!-- ============ 拆分 ============ -->
       <section id="view-split" class="view">
         <div class="card">
-          <h2>① 选择文件</h2>
+          <h2>① 选择文件（一个文件 = 一层，越往后需要越多分片）</h2>
           <div id="dropSplit" class="drop" tabindex="0">
-            <span id="dropSplitText">拖文件到这里，或点击选择</span>
+            <span id="dropSplitText">拖文件到这里，或点击选择（可多选）</span>
+          </div>
+          <div id="nRow" class="n-row" hidden>
+            <label for="nShares">整套分片份数 n</label>
+            <input id="nShares" type="number" min="2" max="16777215" value="5" />
+            <span class="n-note">所有层共用，只在这里设一次</span>
+          </div>
+          <div id="levelList" class="level-list" hidden></div>
+          <div id="levelMore" class="level-more" hidden>
+            <button id="btnAddMore" class="btn btn-ghost" type="button">加入更多文件</button>
+            <button id="btnAddFake" class="btn btn-ghost btn-fake" type="button">加入假文件</button>
           </div>
 
-          <h2>② 设置 k / n</h2>
-          <div class="kn-row">
-            <label>阈值 k（恢复所需最少片数）<input id="inK" type="number" min="2" max="16777215" value="3" /></label>
-            <label>总片数 n（分给几个人）<input id="inN" type="number" min="2" max="16777215" value="5" /></label>
+          <div id="fakeBox" class="fake-box" hidden>
+            <div class="fake-head">
+              <span class="fake-title">假文件层（只能一层，必定最后）</span>
+              <label class="fake-align">密钥串对齐到
+                <select id="fakeAlign">
+                  <option value="32">32 组</option>
+                  <option value="256">256 组</option>
+                  <option value="custom">自定义…</option>
+                </select>
+              </label>
+              <input id="fakeCount" class="fake-count" type="number" min="2" max="4096" value="32" hidden />
+              <button id="btnApplyFake" class="btn btn-ghost" type="button">重算默认值</button>
+            </div>
+            <div id="fakeWarn" class="hint lg-warn" hidden></div>
+            <div id="fakeList" class="fake-list"></div>
+            <div id="fakeSummary" class="fake-summary"></div>
           </div>
-          <p class="hint">每人只需保管一片（几十字节）；密文可随便丢网盘，没有 k 片它毫无意义。</p>
 
-          <h2>③ 压缩（写在密文内，恢复时自动识别）</h2>
+          <p id="levelHint" class="hint" hidden>
+            每行单独设 k；<b>n 是整套分片的份数，改一次全部生效</b>。第 2 层起必须先解开前一层才能看到下一层密文。
+            只有 1 层时 n 会写进密文；多层密文里不写 n（恢复端只能看到你实际导入的片数）。
+          </p>
+
+          <h2>② 压缩（写在密文内，恢复时自动识别）</h2>
           <div class="seg" id="zipSeg" role="radiogroup" aria-label="压缩算法">
             <button type="button" data-algo="0">不压缩</button>
             <button type="button" data-algo="1" class="is-active">zstd L3</button>
@@ -106,7 +132,7 @@
           <h2>② 导入分片</h2>
           <div id="shareMiniList" class="mini-list" hidden></div>
           <div class="share-add-row">
-            <input id="shareInput" type="text" spellcheck="false" placeholder="输入或粘贴一条分片：TSK1:k:base64…，回车添加" />
+            <input id="shareInput" type="text" spellcheck="false" placeholder="输入或粘贴一条分片：TSK1:x:k:y…，回车添加" />
             <button id="btnAddShare" class="btn btn-ghost" type="button">添加</button>
           </div>
           <div class="import-row">
@@ -122,29 +148,20 @@
         </div>
 
         <div id="restoreCard" class="card" hidden>
-          <h2>③ 下载原文件</h2>
-          <div class="restore-ok">
-            <div class="ok-mark">✓</div>
-            <div>
-              <div class="prod-name" id="restName"></div>
-              <div class="prod-meta" id="restMeta"></div>
-            </div>
-          </div>
-          <div id="hashLine" class="hash-line"></div>
-          <div id="otsRestBox" class="ots-box" hidden></div>
-          <div class="dl-row">
-            <button class="btn btn-primary" id="btnDlRest" type="button">下载原文件</button>
-            <button class="btn btn-ghost" id="btnDlOts" type="button" hidden>下载 ots 文件</button>
-          </div>
+          <h2>③ 已解锁的文件</h2>
+          <div id="restoreList" class="restore-list"></div>
+          <div id="restoreMore" class="hint" hidden></div>
         </div>
       </section>
 
       <details class="card about">
         <summary>这是什么？怎么用？</summary>
         <div class="about-body">
-          <p><b>拆分</b>：选择任意文件，设置 k 和 n，点「拆分」。得到 1 个密文 + n 个分片。密文随便放（网盘/U 盘/公共存储），n 个分片交给 n 个人（或自己多处保管）。</p>
-          <p><b>恢复</b>：先选密文（会提示需要几片），再交出任意 k 片分片，点「恢复」。任何人单独持有少于 k 个分片，都推不出任何信息。</p>
-          <p><b>原理</b>：随机生成 32 字节 key，用 AES-256-GCM 加密文件；Shamir 秘密共享（GF(2⁸)）把 key 拆成 k-of-n。所以分片极小，文件本身不分片。</p>
+          <p><b>拆分</b>：选择一个或多个文件（每个文件 = 一层），给每层设 k，选对齐层数，点「拆分」。得到 1 个密文 + n 个分片。密文随便放（网盘/U 盘/公共存储），n 个分片交给 n 个人（或自己多处保管）。</p>
+          <p><b>多层</b>：第 1 层是门槛最低的文件，第 2、3… 层套在它里面，需要更多片才能继续往下解。凑够第 1 层的 k 片只能拿到第 1 层；多凑几片才轮到第 2 层。</p>
+          <p><b>假文件</b>：只能加一层，且必定是最后一层。它长得和真文件一模一样，但拆分时"分片共享的密钥"和"加密用的密钥"不是同一把——所以就算凑够它标注的 k 片，插出来的密钥也打不开它，只能得到解密失败。它的 k 可以设到 n 以上（那样连凑都凑不齐）。同时密钥串会被补到 32（或 256）组：多出来的诱饵组没有对应密文，只是让人看不出里面到底套了几层。</p>
+          <p><b>恢复</b>：先选密文（会提示需要几片），再交出分片，点「恢复」。够哪一层的 k 就解到哪一层，不够的层会显示还差几片。</p>
+          <p><b>原理</b>：每一层各生成一个 32 字节随机 key，用 AES-256-GCM 加密该层明文；Shamir 秘密共享（secp256k1 基域 GF(p)，p = 2²⁵⁶−2³²−977）把每层的 key 拆成 k-of-n，所有层共用同一套坐标。所以分片极小，文件本身不分片。</p>
           <p><b>隐私</b>：整页单文件、无后端、无统计，可另存到本地断网使用。唯一例外是勾选了 OpenTimestamps 存证（会把文件哈希发给公共日历）和点击「在线验证」（会向区块数据源查询）。</p>
           <p>源码：<a href="https://github.com/tdstud1o/tool/tree/main/shamir" target="_blank" rel="noopener">tdstud1o/tool · shamir</a></p>
         </div>

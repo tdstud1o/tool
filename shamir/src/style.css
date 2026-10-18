@@ -198,6 +198,148 @@ h2:first-child { margin-top: 0; }
 }
 .kn-row input:focus { outline: none; border-color: var(--primary); }
 
+/* ===== 层列表（拆分）：一个文件 = 一层 ===== */
+/* n 只出现一次：整套分片份数 */
+.n-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  margin-top: 0.9rem;
+  font-size: 0.86rem;
+  color: var(--secondary);
+}
+.n-row input {
+  width: 7rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--entry);
+  color: var(--text);
+}
+.n-row input:focus { outline: none; border-color: var(--primary); }
+.n-note { font-size: 0.78rem; opacity: 0.8; }
+
+.level-list { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.9rem; }
+.lv-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--entry);
+  font-size: 0.85rem;
+  flex-wrap: wrap;
+}
+.lv-row.is-fake { border-style: dashed; }
+.lv-idx {
+  flex-shrink: 0;
+  min-width: 1.7rem;
+  text-align: center;
+  font-weight: 700;
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+}
+.lv-name { flex: 1 1 7rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lv-size { flex-shrink: 0; color: var(--secondary); font-variant-numeric: tabular-nums; }
+.lv-cell { display: inline-flex; align-items: center; gap: 0.3rem; color: var(--secondary); }
+.lv-cell input {
+  width: 5rem;
+  padding: 0.3rem 0.45rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--theme);
+  color: var(--text);
+}
+.lv-cell input:focus { outline: none; border-color: var(--primary); }
+.lv-cell.lv-size-in input, .lv-cell input.lv-size-in { width: 5.6rem; }
+.lv-na { font-size: 0.76rem; opacity: 0.7; }
+/* 假层 k > n：这套分片永远凑不齐它（n 不写进密文，只有拆分端知道） */
+.lv-over {
+  flex-shrink: 0;
+  padding: 0 0.4rem;
+  border: 1px dashed currentColor;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  line-height: 1.6;
+  color: var(--warn);
+  opacity: 0.85;
+}
+.lv-del { margin-left: auto; padding: 0.2rem 0.55rem; font-size: 0.9rem; }
+
+/* 「加入更多文件 85% / 加入假文件 15%」 */
+.level-more { display: grid; grid-template-columns: 85fr 15fr; gap: 0.5rem; margin-top: 0.7rem; }
+.level-more .btn {
+  margin: 0;
+  padding: 0.55rem 0.4rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.btn-fake { color: var(--secondary); border-style: dashed; }
+
+.fake-box {
+  margin-top: 0.9rem;
+  padding: 0.8rem;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+}
+.fake-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; font-size: 0.85rem; }
+.fake-title { font-weight: 600; }
+.fake-align { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--secondary); }
+.fake-head select, .fake-count {
+  padding: 0.3rem 0.45rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--theme);
+  color: var(--text);
+}
+.fake-count { width: 5.5rem; }
+.fake-head .btn { margin: 0; padding: 0.3rem 0.7rem; font-size: 0.8rem; }
+.fake-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.65rem;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+.fake-summary { margin-top: 0.6rem; font-size: 0.8rem; color: var(--secondary); }
+
+/* ===== 恢复：逐层解锁 ===== */
+.restore-list { display: flex; flex-direction: column; gap: 0.8rem; }
+.rest-item {
+  padding: 0.85rem 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--entry);
+}
+.rest-item.is-locked {
+  border-style: dashed;
+  background: transparent;
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.rest-item.is-fake-layer .rest-lv { background: rgba(180, 83, 9, 0.14); color: #b45309; }
+.rest-item.is-fake-layer .mini-meta { color: #b45309; }
+.rest-head { display: flex; align-items: baseline; gap: 0.55rem; flex-wrap: wrap; margin-bottom: 0.25rem; }
+.rest-lv {
+  flex-shrink: 0;
+  padding: 0.1rem 0.45rem;
+  border-radius: 6px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  background: rgba(79, 70, 229, 0.12);
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+}
+
 .ots-opt {
   display: flex;
   gap: 0.55rem;
