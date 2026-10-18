@@ -202,6 +202,29 @@ export async function otsStamp(fileDigest: Uint8Array, timeoutMs = 20000): Promi
   }
 }
 
+/**
+ * 向日历查询回执升级（OTS "upgrade" 的轻量版）：
+ * GET {uri}/timestamp/<待锚定摘要hex> → 若日历已把该承诺锚上比特币，
+ * 返回的 timestamp 流里会带 BitcoinAttestation。
+ */
+export async function upgradePending(
+  p: { uri: string; digest: Uint8Array | null },
+  timeoutMs = 20000,
+): Promise<OtsParse> {
+  if (!p.digest) throw new Error('回执结构降级，无法确定查询摘要')
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), timeoutMs)
+  try {
+    const res = await fetch(`${p.uri}/timestamp/${toHex(p.digest)}`, { signal: ctl.signal })
+    if (!res.ok) throw new Error(`日历返回 ${res.status}`)
+    const buf = new Uint8Array(await res.arrayBuffer())
+    if (buf.length < 10) throw new Error('日历响应异常（过短）')
+    return await parseOts(buf, p.digest)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export interface OtsOnlineVerify {
   height: number
   blockTime: number

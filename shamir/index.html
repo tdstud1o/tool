@@ -65,15 +65,13 @@
         <div id="resultCard" class="card" hidden>
           <h2>③ 保存产物</h2>
           <div class="naming">
-            <label class="naming-label">产物命名
-              <select id="nameOpt">
-                <option value="date">YYYYMMDD-文件名</option>
-                <option value="name" selected>文件名</option>
-                <option value="uuid">随机 UUID</option>
-                <option value="custom">自定义前缀</option>
-              </select>
-            </label>
-            <input id="namePrefix" type="text" placeholder="前缀，如 backup-" hidden />
+            <div class="seg" id="nameSeg" role="radiogroup" aria-label="产物命名">
+              <button type="button" data-name="date">YYYYMMDD-文件名</button>
+              <button type="button" data-name="name" class="is-active">文件名</button>
+              <button type="button" data-name="uuid">UUID</button>
+              <button type="button" data-name="custom">自定义</button>
+            </div>
+            <input id="nameCustom" type="text" placeholder="自定义文件名（扩展名 .tsss 自动加）" hidden />
           </div>
           <div class="prod">
             <div class="prod-name" id="ctName">…</div>
@@ -92,7 +90,7 @@
         <div class="card">
           <h2>① 选择密文文件</h2>
           <div id="dropCt" class="drop" tabindex="0">
-            <span id="dropCtText">拖密文（.smcf）到这里，或点击选择</span>
+            <span id="dropCtText">拖密文（.tsss）到这里，或点击选择</span>
           </div>
           <div id="ctInfo" class="ct-info" hidden></div>
 

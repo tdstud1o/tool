@@ -3,7 +3,7 @@ import { SMCF, SMPK, tlvBuild, tlvParse, u64beBytes, beBytesToU64 } from './core
 import { IV_LEN, KEY_LEN, aesDecrypt, aesEncrypt, randomBytes, sha256 } from './core/crypto.ts'
 import { shamirSplit, shamirCombine } from './core/shamir.ts'
 import { checkConsistency, encodeShare, parseShares, type ShareEntry } from './core/format.ts'
-import { otsStamp, parseOts, verifyAnchorOnline } from './core/ots.ts'
+import { otsStamp, parseOts, upgradePending, verifyAnchorOnline } from './core/ots.ts'
 import { toHex } from './core/b64.ts'
 
 // ===== 工具 =====
@@ -199,25 +199,40 @@ for (const el of [inK, inN])
     refreshSplitBtn()
   })
 
-// ===== 产物命名（本地记住上次选择）=====
+// ===== 产物命名（段式按钮，本地记住上次选择）=====
 
-const nameOpt = $<HTMLSelectElement>('nameOpt')
-const namePrefix = $<HTMLInputElement>('namePrefix')
+const nameSeg = $('nameSeg')
+const nameCustom = $<HTMLInputElement>('nameCustom')
+
+function nameMode(): string {
+  return nameSeg.querySelector('button.is-active')!.getAttribute('data-name')!
+}
+
+function setNameMode(mode: string): void {
+  for (const b of nameSeg.querySelectorAll('button'))
+    b.classList.toggle('is-active', b.getAttribute('data-name') === mode)
+  nameCustom.hidden = mode !== 'custom'
+  try {
+    localStorage.setItem('shamir-name-opt', mode)
+    localStorage.setItem('shamir-name-custom', nameCustom.value)
+  } catch { /* ignore */ }
+}
 
 try {
   const savedOpt = localStorage.getItem('shamir-name-opt')
-  if (savedOpt) nameOpt.value = savedOpt
-  namePrefix.value = localStorage.getItem('shamir-name-prefix') ?? ''
+  if (savedOpt) setNameMode(savedOpt)
+  nameCustom.value = localStorage.getItem('shamir-name-custom') ?? ''
+  nameCustom.hidden = nameMode() !== 'custom'
   $<HTMLInputElement>('otsCheck').checked = localStorage.getItem('shamir-ots') === '1'
 } catch { /* ignore */ }
 
-nameOpt.addEventListener('change', () => {
-  namePrefix.hidden = nameOpt.value !== 'custom'
-  try { localStorage.setItem('shamir-name-opt', nameOpt.value) } catch { /* ignore */ }
-  renderProductNames()
-})
-namePrefix.addEventListener('input', () => {
-  try { localStorage.setItem('shamir-name-prefix', namePrefix.value) } catch { /* ignore */ }
+for (const b of nameSeg.querySelectorAll('button'))
+  b.addEventListener('click', () => {
+    setNameMode(b.getAttribute('data-name')!)
+    renderProductNames()
+  })
+nameCustom.addEventListener('input', () => {
+  try { localStorage.setItem('shamir-name-custom', nameCustom.value) } catch { /* ignore */ }
   renderProductNames()
 })
 $<HTMLInputElement>('otsCheck').addEventListener('change', (e) => {
@@ -227,7 +242,7 @@ $<HTMLInputElement>('otsCheck').addEventListener('change', (e) => {
 /** 按命名选项生成产物词干（不含扩展名） */
 function productStem(): string {
   const base = splitFile ? baseName(splitFile.name) : 'file'
-  switch (nameOpt.value) {
+  switch (nameMode()) {
     case 'date': {
       const d = new Date()
       const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
@@ -235,8 +250,10 @@ function productStem(): string {
     }
     case 'uuid':
       return uuid()
-    case 'custom':
-      return `${namePrefix.value}${base}`
+    case 'custom': {
+      const custom = nameCustom.value.trim()
+      return custom || base // 自定义文件名；为空时回退原文件名
+    }
     default:
       return base
   }
@@ -354,18 +371,18 @@ function renderProductNames(): void {
   if (!splitResult) return
   const stem = productStem()
   splitResult.stem = stem
-  $('ctName').textContent = `${stem}.smcf`
+  $('ctName').textContent = `${stem}.tsss`
   document.querySelectorAll('.share-row').forEach((row, i) => {
     const span = row.querySelector('.share-name') as HTMLElement | null
-    if (span) span.textContent = `${stem}_第${i + 1}片.txt`
+    if (span) span.textContent = `${stem}_share${i + 1}.txt`
   })
 }
 
 function renderSplitResult(f: File, k: number, n: number, ots: Uint8Array | null): void {
-  namePrefix.hidden = nameOpt.value !== 'custom'
+  nameCustom.hidden = nameMode() !== 'custom'
   const card = $('resultCard')
   card.hidden = false
-  $('ctName').textContent = `${splitResult!.stem}.smcf`
+  $('ctName').textContent = `${splitResult!.stem}.tsss`
   $('ctMeta').textContent = `${fmtSize(f.size)} → ${fmtSize(splitResult!.ciphertext.length)} · k=${k}/n=${n}`
 
   const box = $('otsBox')
@@ -394,7 +411,7 @@ function renderSplitResult(f: File, k: number, n: number, ots: Uint8Array | null
     const name = document.createElement('div')
     name.className = 'share-name'
     name.hidden = true
-    name.textContent = `${splitResult!.stem}_第${i + 1}片.txt`
+    name.textContent = `${splitResult!.stem}_share${i + 1}.txt`
     const bCopy = document.createElement('button')
     bCopy.className = 'btn share-btn'
     bCopy.type = 'button'
@@ -404,19 +421,19 @@ function renderSplitResult(f: File, k: number, n: number, ots: Uint8Array | null
     bDl.className = 'btn share-btn'
     bDl.type = 'button'
     bDl.textContent = '下载'
-    bDl.addEventListener('click', () => download(`${splitResult!.stem}_第${i + 1}片.txt`, new TextEncoder().encode(text + '\n')))
+    bDl.addEventListener('click', () => download(`${splitResult!.stem}_share${i + 1}.txt`, new TextEncoder().encode(text + '\n')))
     row.append(idx, span, name, bCopy, bDl)
     list.appendChild(row)
   })
 
   $<HTMLButtonElement>('btnDlCt').onclick = () =>
-    download(`${splitResult!.stem}.smcf`, splitResult!.ciphertext)
+    download(`${splitResult!.stem}.tsss`, splitResult!.ciphertext)
 
   $<HTMLButtonElement>('btnDlAll').onclick = async () => {
-    download(`${splitResult!.stem}.smcf`, splitResult!.ciphertext)
+    download(`${splitResult!.stem}.tsss`, splitResult!.ciphertext)
     for (let i = 0; i < splitResult!.shareTexts.length; i++) {
       await new Promise((r) => setTimeout(r, 250))
-      download(`${splitResult!.stem}_第${i + 1}片.txt`, new TextEncoder().encode(splitResult!.shareTexts[i]! + '\n'))
+      download(`${splitResult!.stem}_share${i + 1}.txt`, new TextEncoder().encode(splitResult!.shareTexts[i]! + '\n'))
     }
   }
 
@@ -598,7 +615,8 @@ async function renderRestore(
   $('restMeta').textContent = `${fmtSize(data.length)}${createdAt ? ` · ${new Date(createdAt).toLocaleString()}` : ''}`
   $('hashLine').textContent = `SHA-256：${toHex(actualHash)}${hashOk === false ? '\n⚠️ 与打包时记录的哈希不一致，文件可能被篡改！' : ''}`
 
-  // OTS：回执在内层，解密后才可见；初始消息 = 原文件哈希，重放 ops 得到被锚定摘要
+  // OTS：回执在内层，解密后才可见；初始消息 = 原文件哈希，重放 ops 得到被锚定摘要。
+  // 检测到回执就自动后台查询（不阻塞文件下载）：pending → 查日历升级；已锚定 → 直接链上验证。
   const otsBytes = pack.chunks.get(SMPK.TAG.OTS_RECEIPT)
   const box = $('otsRestBox')
   if (otsBytes) {
@@ -606,50 +624,58 @@ async function renderRestore(
     box.innerHTML = ''
     try {
       const ots = await parseOts(otsBytes, actualHash)
-      const pending = ots.attestations.filter((a) => a.kind === 'pending') as { kind: 'pending'; uri: string }[]
+      const pending = ots.attestations.filter((a) => a.kind === 'pending') as { kind: 'pending'; uri: string; digest: Uint8Array | null }[]
       const anchors = ots.attestations.filter((a) => a.kind === 'bitcoin') as { kind: 'bitcoin'; height: number; digest: Uint8Array | null }[]
 
       const status = document.createElement('div')
       status.className = 'ots-line'
+      const spinning = '<span class="spinner" aria-hidden="true"></span>'
       if (anchors.length > 0) {
         status.innerHTML =
           `<span class="ots-status ok">OTS 已锚定 Bitcoin 区块 #${anchors.map((a) => a.height).join(' / #')}</span>` +
-          `<span>点击下方按钮做完整区块链验证。</span>`
+          `${spinning}<span>正在比对区块链…</span>`
       } else if (pending.length > 0) {
         status.innerHTML =
           `<span class="ots-status pending">OTS 待锚定</span>` +
-          `<span>已提交日历（${pending.map((p) => p.uri).join('、')}），比特币锚定约需数小时。</span>`
+          `${spinning}<span>拆分时已提交日历，正在后台查询最新状态…</span>`
       } else {
         status.innerHTML = `<span class="ots-status pending">OTS 回执存在，但未识别出 attestation</span>`
       }
       box.appendChild(status)
 
-      if (anchors.length > 0 && anchors.every((a) => a.digest)) {
-        const btn = document.createElement('button')
-        btn.className = 'btn btn-ghost'
-        btn.type = 'button'
-        btn.textContent = '在线完整验证（需联网）'
-        btn.addEventListener('click', async () => {
-          btn.disabled = true
-          btn.textContent = '验证中…'
-          const line = document.createElement('div')
-          line.className = 'ots-line'
-          try {
-            const results = await Promise.all(
-              anchors.map((a) => verifyAnchorOnline({ height: a.height, digest: a.digest! })),
-            )
-            const ok = results.some((r) => r.ok)
-            line.innerHTML =
-              `<span class="ots-status ${ok ? 'ok' : 'pending'}">${ok ? '✓ 区块链验证通过' : '✗ 验证未通过'}</span>` +
-              results.map((r) => `<span>#${r.height} @ ${new Date(r.blockTime).toLocaleString()}：${r.detail}</span>`).join('')
-          } catch (e) {
-            line.innerHTML = `<span class="ots-status pending">在线验证失败：${e instanceof Error ? e.message : e}</span>`
+      // 后台查询：完成后原地更新状态行（成功/失败都不打扰用户下载文件）
+      void (async () => {
+        const line = document.createElement('div')
+        line.className = 'ots-line'
+        try {
+          let toVerify: { height: number; digest: Uint8Array | null }[] = anchors
+          if (anchors.length === 0) {
+            // 日历升级查询：拿到含 BitcoinAttestation 的新回执再上链验证
+            const upgraded = await Promise.all(pending.map((p) => upgradePending(p)))
+            toVerify = upgraded.flatMap((u) =>
+              u.attestations.filter((a) => a.kind === 'bitcoin'),
+            ) as { kind: 'bitcoin'; height: number; digest: Uint8Array | null }[]
+            if (toVerify.length === 0) {
+              status.innerHTML =
+                `<span class="ots-status pending">OTS 待锚定</span>` +
+                `<span>已查日历（${pending.map((p) => p.uri).join('、')}）：尚未上链，比特币锚定通常需 1~3 小时，之后重新恢复本密文可自动再查。</span>`
+              return
+            }
           }
-          box.appendChild(line)
-          btn.hidden = true
-        })
-        box.appendChild(btn)
-      }
+          const results = await Promise.all(
+            toVerify.map((a) => verifyAnchorOnline({ height: a.height, digest: a.digest })),
+          )
+          const ok = results.some((r) => r.ok)
+          status.innerHTML =
+            `<span class="ots-status ${ok ? 'ok' : 'pending'}">${ok ? '✓ OTS 存证有效（区块链验证通过）' : '⚠️ OTS 上链但验证未通过，请警惕文件来源'}</span>` +
+            results.map((r) => `<span>#${r.height} @ ${new Date(r.blockTime).toLocaleString()}：${r.detail}</span>`).join('')
+        } catch (e) {
+          status.innerHTML =
+            `<span class="ots-status pending">OTS 待锚定（后台查询失败：${e instanceof Error ? e.message : e}）</span>` +
+            `<span>查询不影响文件本身；网络可用时可重新恢复本密文再查。</span>`
+        }
+      })()
+
       if (ots.degraded) {
         const note = document.createElement('div')
         note.className = 'ots-line'
