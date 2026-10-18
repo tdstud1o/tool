@@ -1,0 +1,31 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: shamir/package-lock.json
+      - run: npm ci
+        working-directory: shamir
+      - run: npx tsc --noEmit && npm test
+        working-directory: shamir
+      - run: npm run build
+        working-directory: shamir
+      # 离线版 = 构建出的单文件 HTML，改名带版本号挂到 Release
+      - run: cp shamir/dist/index.html shamir-${{ github.ref_name }}-offline.html
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: shamir-${{ github.ref_name }}-offline.html
+          generate_release_notes: true

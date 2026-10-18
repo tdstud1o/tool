@@ -18,5 +18,6 @@ tool/
 ## 部署约定
 
 - 每个子目录是独立的 Vite 项目，构建产物由 GitHub Actions（actions/deploy-pages）发布。
+- 推送 `v*` tag 会由 release 工作流构建**离线单文件版**并挂到 GitHub Releases（如 `shamir-v1.0.0-offline.html`）。
 - Pages 站点 URL 固定为 `tdstud1o.github.io/tool/`，因此各子项目 `base` 必须设为 `/tool/<name>/`。
 - 零后端、零外发请求，所有计算在浏览器本地完成。
