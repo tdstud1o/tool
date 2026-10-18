@@ -116,6 +116,15 @@
 
         <div id="resultCard" class="card" hidden>
           <h2>保存产物</h2>
+          <div class="naming">
+            <div class="seg" id="nameSeg" role="radiogroup" aria-label="产物命名">
+              <button type="button" data-name="date">YYYYMMDD-文件名</button>
+              <button type="button" data-name="name" class="is-active">文件名</button>
+              <button type="button" data-name="uuid">UUID</button>
+              <button type="button" data-name="custom">自定义</button>
+            </div>
+            <input id="nameCustom" type="text" placeholder="自定义文件名（扩展名 .tscf 自动加）" hidden />
+          </div>
           <div class="prod">
             <div class="prod-name" id="ctName">…</div>
             <div class="prod-meta" id="ctMeta"></div>
@@ -125,20 +134,6 @@
           <div class="prod-title">分片（每人一片）</div>
           <div id="shareList" class="share-list"></div>
           <button class="btn btn-ghost" id="btnDlAll" type="button">下载全部（密文 + 分片）</button>
-          <details class="adv">
-            <summary>高级操作</summary>
-            <div class="adv-body">
-              <div class="naming">
-                <div class="seg" id="nameSeg" role="radiogroup" aria-label="产物命名">
-                  <button type="button" data-name="date">YYYYMMDD-文件名</button>
-                  <button type="button" data-name="name" class="is-active">文件名</button>
-                  <button type="button" data-name="uuid">UUID</button>
-                  <button type="button" data-name="custom">自定义</button>
-                </div>
-                <input id="nameCustom" type="text" placeholder="自定义文件名（扩展名 .tscf 自动加）" hidden />
-              </div>
-            </div>
-          </details>
         </div>
       </section>
 

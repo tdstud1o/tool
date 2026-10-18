@@ -65,6 +65,12 @@ body::before {
     var(--theme);
 }
 
+html {
+  /* 高级操作展开/收起时页面高度变化会让滚动条出现/消失，居中内容随之横移；
+     常驻预留滚动条槽位即可消除抖动（无滚动条的窄屏上槽位本身不占宽） */
+  scrollbar-gutter: stable;
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
@@ -219,28 +225,43 @@ h2:first-child { margin-top: 0; }
 .n-note { font-size: 0.78rem; opacity: 0.8; }
 
 .level-list { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.9rem; }
+/* 层行：[序号 5%] [两行主体 85%] [移除 10%]，移除按钮做成 add-seg 那种同体样式 */
 .lv-row {
   display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  padding: 0.45rem 0.6rem;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--entry);
   font-size: 0.85rem;
-  flex-wrap: wrap;
+  overflow: hidden;
 }
 .lv-row.is-fake { border-style: dashed; }
 .lv-idx {
-  flex-shrink: 0;
-  min-width: 1.7rem;
-  text-align: center;
+  flex: 0 0 5%;
+  min-width: 2.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid var(--border);
   font-weight: 700;
   color: var(--primary);
   font-variant-numeric: tabular-nums;
 }
-.lv-name { flex: 1 1 7rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lv-size { flex-shrink: 0; color: var(--secondary); font-variant-numeric: tabular-nums; }
+.lv-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.3rem;
+  padding: 0.45rem 0.7rem;
+}
+.lv-line { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+.lv-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 右端项（假层的大小编辑 / 显示k）推到行尾 */
+.lv-size-edit, .lv-showk-cell { margin-left: auto; }
 .lv-cell { display: inline-flex; align-items: center; gap: 0.3rem; color: var(--secondary); }
 .lv-cell input {
   width: 5rem;
@@ -265,7 +286,23 @@ h2:first-child { margin-top: 0; }
   color: var(--warn);
   opacity: 0.85;
 }
-.lv-del { margin-left: auto; padding: 0.2rem 0.55rem; font-size: 0.9rem; }
+/* 移除按钮：与「加入假文件」段同款——透明底、1px 分割线、hover 点亮那一段；只占 10% 宽 */
+.lv-del {
+  flex: 0 0 10%;
+  min-width: 2.6rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--secondary);
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.lv-del:hover:not(:disabled) { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+:root[data-theme="dark"] .lv-del:hover:not(:disabled) { background: rgba(248, 113, 113, 0.16); color: #f87171; }
 /* 每层的「显示k」勾选：勾上才把该层 k 写进分片文本（× 左边） */
 .lv-showk-cell {
   display: inline-flex;

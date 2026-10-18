@@ -391,15 +391,19 @@ function enforceFakeK(): void {
   if (badge) badge.hidden = f.k <= nShares
 }
 
-/** 一层的一行：真文件 = 大小 + k；假文件 = 大小（可改）+ k（可超过 n） */
+/** 一层的一行：两行布局——第一行主信息（文件名…大小），第二行设置项（k…显示k） */
 function levelRow(lv: LevelRow, idx: number): HTMLElement {
   const isFake = lv.kind === 'fake'
   const row = el('div', `lv-row${isFake ? ' is-fake' : ''}`)
-  // 假文件就是一段随机乱码，没有文件名的概念，显示成"假文件层"就够了
-  row.append(el('span', 'lv-idx', String(idx + 1)), el('span', 'lv-name', isFake ? '假文件层' : lv.name))
-  // 真文件的大小是既成事实，直接显示；假文件的大小可编辑，只留输入框
-  if (!isFake) row.append(el('span', 'lv-size', fmtSize(lv.size)))
+  // 左侧 5% 固定放序号
+  row.append(el('span', 'lv-idx', String(idx + 1)))
 
+  const main = el('div', 'lv-main')
+
+  // 第一行（主信息）：文件名 (99.4 KB)；假文件就是一段随机乱码，没有文件名，
+  // 显示成"假文件层"，大小可编辑（用户不改就用默认值）
+  const line1 = el('div', 'lv-line')
+  line1.append(el('span', 'lv-name', isFake ? '假文件层' : `${lv.name} (${fmtSize(lv.size)})`))
   if (isFake) {
     const sizeIn = document.createElement('input')
     sizeIn.type = 'number'
@@ -413,7 +417,7 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
         lv.size = Math.max(64, Math.round(kb * 1024))
       }
     })
-    row.append(el('label', 'lv-cell', '大小 ', sizeIn, ' KB'))
+    line1.append(el('label', 'lv-cell lv-size-edit', '大小 ', sizeIn, ' KB'))
   }
 
   const kIn = document.createElement('input')
@@ -467,10 +471,12 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
   })
   kIn.addEventListener('blur', () => { kIn.value = String(lv.k) })
   kInputs.set(lv, kIn)
-  row.append(el('label', 'lv-cell lv-k', '需要 ', kIn, ' 人才能解锁'))
-  if (overHint) row.append(overHint)
+  // 第二行（设置项）：需要 [k] 人才能解锁 …… ☑ 显示k
+  const line2 = el('div', 'lv-line')
+  line2.append(el('label', 'lv-cell lv-k', '需要 ', kIn, ' 人才能解锁'))
+  if (overHint) line2.append(overHint)
 
-  const del = el('button', 'btn share-btn lv-del', '×') as HTMLButtonElement
+  const del = el('button', 'lv-del', '×') as HTMLButtonElement
   del.type = 'button'
   del.title = isFake ? '移除假文件层（重新允许添加文件）' : '移除这一层'
   del.addEventListener('click', () => {
@@ -496,7 +502,10 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
   showK.addEventListener('change', () => {
     lv.showK = showK.checked
   })
-  row.append(showKLabel, del)
+  line2.append(showKLabel)
+
+  main.append(line1, line2)
+  row.append(main, del)
   return row
 }
 
@@ -643,14 +652,14 @@ function setNameMode(mode: string): void {
   nameCustom.hidden = mode !== 'custom'
   try {
     localStorage.setItem('shamir-name-opt', mode)
-    localStorage.setItem('shamir-name-custom', nameCustom.value)
   } catch { /* ignore */ }
 }
 
 try {
   const savedOpt = localStorage.getItem('shamir-name-opt')
   if (savedOpt) setNameMode(savedOpt)
-  nameCustom.value = localStorage.getItem('shamir-name-custom') ?? ''
+  // 自定义文件名不记忆：只活在当前页面，刷新即清空（顺带清掉旧版本存过的值）
+  localStorage.removeItem('shamir-name-custom')
   nameCustom.hidden = nameMode() !== 'custom'
   $<HTMLInputElement>('otsCheck').checked = localStorage.getItem('shamir-ots') === '1'
 } catch { /* ignore */ }
@@ -661,7 +670,6 @@ for (const b of nameSeg.querySelectorAll('button'))
     renderProductNames()
   })
 nameCustom.addEventListener('input', () => {
-  try { localStorage.setItem('shamir-name-custom', nameCustom.value) } catch { /* ignore */ }
   renderProductNames()
 })
 // ===== 压缩算法选择（默认 zstd L3，记忆上次选择）=====
