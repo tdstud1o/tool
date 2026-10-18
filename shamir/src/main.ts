@@ -23,7 +23,7 @@ import {
   verifyAnchorOnline,
 } from './core/ots.ts'
 import { bytesEq, toB64, toHex } from './core/b64.ts'
-import { buildZip } from './core/zip.ts'
+import { buildZip, isZipBuffer, readZip, type ZipReadEntry } from './core/zip.ts'
 
 /** 拆分结果里最多渲染多少行分片；超出部分折叠（n 可达十万级） */
 const SHARE_ROWS = 50
@@ -1150,53 +1150,97 @@ function importShareText(text: string): { added: number; errors: string[] } {
   return { added, errors }
 }
 
-/** 摄取文件：TSCF 头 → 密文；含 TSK1 分片文本 → 逐片导入；其余报错（结果全进按钮下方日志） */
+/** 摄取单个文件内容：TSCF 头 → 密文；含 TSK1 分片文本 → 逐片导入；其余报错（结果全进按钮下方日志） */
+async function ingestBlob(
+  name: string,
+  size: number,
+  buf: Uint8Array,
+  verbose: boolean,
+  tally: { shareFiles: number; shareCount: number },
+): Promise<void> {
+  try {
+    let handled = false
+    try {
+      const outer = tlvParse(TSCF.MAGIC, buf)
+      if (outer.version !== TSCF.VERSION) throw new Error(`不支持的密文版本 v${outer.version}`)
+      const kBytes = outer.chunks.get(TSCF.TAG.K)
+      const nBytes = outer.chunks.get(TSCF.TAG.N)
+      const k = kBytes ? beBytesToUint(kBytes) : 0
+      const n = nBytes ? beBytesToUint(nBytes) : undefined
+      if (!k) throw new Error('密文缺少 k 参数')
+      const entry: CtEntry = { name, size, bytes: buf, k, n }
+      ctEntries.push(entry)
+      activeCt = entry
+      handled = true
+    } catch (ctErr) {
+      // 不是密文 → 尝试按分片文本处理；带密文扩展名却解析失败则直接报错
+      const text = new TextDecoder('utf-8', { fatal: false }).decode(buf)
+      if (!SHARE_RE.test(text)) {
+        if (/\.tscf$/i.test(name)) throw ctErr
+        throw new Error(`无法识别的文件（既不是密文也不含分片）`)
+      }
+      const { added, errors } = importShareText(text)
+      tally.shareFiles++
+      tally.shareCount += added
+      if (verbose || errors.length)
+        logLine(
+          'restoreLog',
+          `${name}：导入 ${added} 片${errors.length ? `；${errors.join('；')}` : ''}`,
+          errors.length ? 'lg-warn' : 'lg-ok',
+        )
+    }
+    if (handled && verbose) logLine('restoreLog', `🔐 ${name}（${fmtSize(size)}）已加入密文列表`, 'lg-ok')
+  } catch (e) {
+    logLine('restoreLog', `⚠️ ${name}：${e instanceof Error ? e.message : String(e)}`, 'lg-err')
+  }
+}
+
+/** 取 zip「当前层级」的文件：只列当前层；若当前层只有 1 个文件夹，下钻一层取其直接子文件 */
+function pickZipLevel(entries: ZipReadEntry[]): ZipReadEntry[] {
+  const files = entries.filter((e) => !e.isDir)
+  const loose = files.filter((e) => !e.name.includes('/'))
+  const rootDirs = entries.filter((e) => e.isDir && !e.name.slice(0, -1).includes('/'))
+  // 显式目录条目：当前层只有 1 个文件夹、没有散文件 → 下钻
+  if (rootDirs.length === 1 && loose.length === 0 && files.length === 0)
+    return files.filter((e) => e.name.startsWith(rootDirs[0]!.name) && !e.name.slice(rootDirs[0]!.name.length).includes('/'))
+  // 没有目录条目（很多打 zip 工具不写）：所有文件共享唯一路径前缀 → 视作同一个文件夹，下钻
+  if (loose.length === 0 && files.length > 0) {
+    const tops = new Set(files.map((e) => e.name.slice(0, e.name.indexOf('/') + 1)))
+    if (tops.size === 1) {
+      const prefix = [...tops][0]!
+      return files.filter((e) => !e.name.slice(prefix.length).includes('/'))
+    }
+  }
+  return loose
+}
+
+/** 摄取文件：zip → 解压取当前层级逐个导入；TSCF 头 → 密文；含 TSK1 分片文本 → 逐片导入；其余报错 */
 async function ingestFiles(files: File[]): Promise<void> {
   // 一次拖进上万个文件是真实场景（k 很大时要凑很多片）：
   // 逐个文件写日志 + 逐个重渲染列表会把界面拖死，所以只在文件少时逐条记。
   const verbose = files.length <= 20
-  let shareFiles = 0
-  let shareCount = 0
+  const tally = { shareFiles: 0, shareCount: 0 }
+  let quiet = false
   for (const f of files) {
     try {
       const buf = new Uint8Array(await f.arrayBuffer())
-      let handled = false
-      try {
-        const outer = tlvParse(TSCF.MAGIC, buf)
-        if (outer.version !== TSCF.VERSION) throw new Error(`不支持的密文版本 v${outer.version}`)
-        const kBytes = outer.chunks.get(TSCF.TAG.K)
-        const nBytes = outer.chunks.get(TSCF.TAG.N)
-        const k = kBytes ? beBytesToUint(kBytes) : 0
-        const n = nBytes ? beBytesToUint(nBytes) : undefined
-        if (!k) throw new Error('密文缺少 k 参数')
-        const entry: CtEntry = { name: f.name, size: f.size, bytes: buf, k, n }
-        ctEntries.push(entry)
-        activeCt = entry
-        handled = true
-      } catch (ctErr) {
-        // 不是密文 → 尝试按分片文本处理；带密文扩展名却解析失败则直接报错
-        const text = new TextDecoder('utf-8', { fatal: false }).decode(buf)
-        if (!SHARE_RE.test(text)) {
-          if (/\.tscf$/i.test(f.name)) throw ctErr
-          throw new Error(`无法识别的文件（既不是密文也不含分片）`)
-        }
-        const { added, errors } = importShareText(text)
-        shareFiles++
-        shareCount += added
-        if (verbose || errors.length)
-          logLine(
-            'restoreLog',
-            `${f.name}：导入 ${added} 片${errors.length ? `；${errors.join('；')}` : ''}`,
-            errors.length ? 'lg-warn' : 'lg-ok',
-          )
+      if (isZipBuffer(buf)) {
+        // zip：解压后把当前层级的文件逐个按密文/分片导入
+        const picked = pickZipLevel(await readZip(buf))
+        if (!picked.length) throw new Error('压缩包当前层级没有可导入的文件')
+        const v = verbose && picked.length <= 20
+        if (!v) quiet = true
+        logLine('restoreLog', `📦 ${f.name}：解出 ${picked.length.toLocaleString()} 个文件`, 'lg-ok')
+        for (const e of picked) await ingestBlob(e.name, e.data.length, e.data, v, tally)
+      } else {
+        await ingestBlob(f.name, f.size, buf, verbose, tally)
       }
-      if (handled && verbose) logLine('restoreLog', `🔐 ${f.name}（${fmtSize(f.size)}）已加入密文列表`, 'lg-ok')
     } catch (e) {
       logLine('restoreLog', `⚠️ ${f.name}：${e instanceof Error ? e.message : String(e)}`, 'lg-err')
     }
   }
-  if (!verbose && shareFiles > 0)
-    logLine('restoreLog', `已从 ${shareFiles.toLocaleString()} 个文件导入 ${shareCount.toLocaleString()} 片，当前共 ${shareMap.size.toLocaleString()} 片`, 'lg-ok')
+  if (tally.shareFiles > 0 && (!verbose || quiet))
+    logLine('restoreLog', `已从 ${tally.shareFiles.toLocaleString()} 个文件导入 ${tally.shareCount.toLocaleString()} 片，当前共 ${shareMap.size.toLocaleString()} 片`, 'lg-ok')
   renderShareList()
   renderCtList()
   refreshRestoreBtn()
