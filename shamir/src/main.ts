@@ -1371,6 +1371,9 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
 
     const card = $('restoreCard')
     const list = $('restoreList')
+    // 上一轮预览图的 blob URL 回收（预览不撤销，反复恢复会攒一堆）
+    for (const u of restoredUrls) URL.revokeObjectURL(u)
+    restoredUrls.length = 0
     list.textContent = ''
     card.hidden = false
     const more = $('restoreMore')
@@ -1458,6 +1461,8 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
       const createdAtBytes = pack.chunks.get(TSPK.TAG.CREATED_AT)
       const createdAt = createdAtBytes ? beBytesToU64(createdAtBytes) : null
       const name = nameBytes ? new TextDecoder().decode(nameBytes) : defaultName(createdAt)
+      const mimeBytes = pack.chunks.get(TSPK.TAG.MIME)
+      const mime = mimeBytes ? new TextDecoder().decode(mimeBytes) : ''
 
       // SHA-256 完整性：假文件也带自己那份（对乱码算的），所以照样能对上，
       // 不会因为"校验失败"提前暴露它是假的
@@ -1470,6 +1475,7 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
         index: j + 1,
         name,
         data,
+        mime,
         createdAt,
         hashOk,
         hash: actual,
@@ -1517,11 +1523,21 @@ function defaultName(createdAt: number | null): string {
   return `${ymd}.bin`
 }
 
+/** 本轮恢复产出的预览 blob URL，下一次恢复开始时统一回收 */
+const restoredUrls: string[] = []
+
+/** 图片（按内层 MIME 或扩展名判断）恢复后直接在页面上预览 */
+function isImageName(name: string, mime: string): boolean {
+  if (mime.startsWith('image/')) return true
+  return /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i.test(name)
+}
+
 /** 已解锁的一层 */
 function levelCard(r: {
   index: number
   name: string
   data: Uint8Array
+  mime: string
   createdAt: number | null
   hashOk: boolean | null
   hash: Uint8Array
@@ -1534,6 +1550,17 @@ function levelCard(r: {
   box.append(
     el('div', 'prod-meta', `${fmtSize(r.data.length)}${r.createdAt ? ` · ${new Date(r.createdAt).toLocaleString()}` : ' · 时间未记录'}`),
   )
+  if (isImageName(r.name, r.mime)) {
+    // 本地 blob URL 预览（CSP 的 img-src blob: 已放行）；img 上下文不执行脚本，SVG 也安全
+    const url = URL.createObjectURL(new Blob([r.data], { type: r.mime || 'application/octet-stream' }))
+    restoredUrls.push(url)
+    const img = document.createElement('img')
+    img.className = 'rest-preview'
+    img.src = url
+    img.alt = r.name
+    img.decoding = 'async'
+    box.append(img)
+  }
   box.append(
     el(
       'div',
