@@ -196,16 +196,25 @@ function refreshSplitBtn(): void {
   $<HTMLButtonElement>('btnSplit').disabled = !splitFile || !readKn()
 }
 
-for (const el of [inK, inN])
-  el.addEventListener('input', () => {
-    const v = readKn()
-    if (v) {
-      if (Number(inN.value) < Number(inK.value)) inK.value = inN.value
-      if (Number(inK.value) < 2) inK.value = '2'
-      if (Number(inN.value) > 255) inN.value = '255'
-    }
-    refreshSplitBtn()
-  })
+// k/n 联动：调高 k 时 n 跟随到 k；调低 n 时 k 跟随到 n（恒保证 2 ≤ k ≤ n ≤ 255）
+inK.addEventListener('input', () => {
+  const k = Math.round(Number(inK.value))
+  if (Number.isFinite(k)) {
+    const kc = Math.min(255, Math.max(2, k))
+    if (String(kc) !== inK.value) inK.value = String(kc)
+    if (Number(inN.value) < kc) inN.value = String(kc)
+  }
+  refreshSplitBtn()
+})
+inN.addEventListener('input', () => {
+  const n = Math.round(Number(inN.value))
+  if (Number.isFinite(n)) {
+    const nc = Math.min(255, Math.max(2, n))
+    if (String(nc) !== inN.value) inN.value = String(nc)
+    if (Number(inK.value) > nc) inK.value = String(nc)
+  }
+  refreshSplitBtn()
+})
 
 // ===== 产物命名（段式按钮，本地记住上次选择）=====
 
