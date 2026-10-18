@@ -58,12 +58,18 @@ export function tlvParse(magic: string, b: Uint8Array): TlvFile {
 
 // ===== 外层：SMCF 密文容器 =====
 // 外层 tag 编号 = 物理布局顺序（顺序读取无需跳转）：K → N → IV → CIPHERTEXT
+//
+// TLV tag 注册表（语义编号，一旦发布冻结，禁止改义/回收复用；加新字段挑空号）
+//   SMCF: 0x01 FILENAME（已废止：v1.2 起不再写入，解析时视为未知 tag 跳过）
+//         | 0x02 K | 0x03 N | 0x04 IV | 0x05 CIPHERTEXT（末块）| 0x06-0xFF 空闲
+//   SMPK: 0x01 FILENAME | 0x04 CREATED_AT | 0x05 MIME | 0x06 NOTE（预留未用）
+//         | 0x07 SHA256 | 0x11 DATA（末块）| 0x12 OTS_RECEIPT | 0x13-0xFF 空闲
+//   0x02/0x03 在 SMPK 中为两层拆分前的历史空洞，与 SMCF 的 K/N 含义无关。
 
 export const SMCF = {
   MAGIC: 'SMCF',
   VERSION: 1,
   TAG: {
-    FILENAME: 0x01, // utf-8，展示用（真实元数据在内层）
     K: 0x02, // 1B 阈值（无密钥可读，用于与分片交叉校验）
     N: 0x03, // 1B 总片数
     IV: 0x04, // 12B

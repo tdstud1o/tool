@@ -109,7 +109,7 @@ const inner = tlvBuild(
 )
 const ct = await aesEncrypt(key, iv, inner)
 const ctFile = tlvBuild(SMCF.MAGIC, SMCF.VERSION, [
-  { tag: SMCF.TAG.FILENAME, value: new TextEncoder().encode('cat.jpg') },
+  { tag: 0x01, value: new TextEncoder().encode('cat.jpg') }, // 旧版 FILENAME：新解析器应按未知 tag 跳过
   { tag: SMCF.TAG.K, value: new Uint8Array([3]) },
   { tag: SMCF.TAG.N, value: new Uint8Array([5]) },
   { tag: SMCF.TAG.IV, value: iv },

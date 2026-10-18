@@ -350,7 +350,6 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
       SMCF.MAGIC,
       SMCF.VERSION,
       [
-        { tag: SMCF.TAG.FILENAME, value: new TextEncoder().encode(f.name) },
         { tag: SMCF.TAG.K, value: new Uint8Array([k]) },
         { tag: SMCF.TAG.N, value: new Uint8Array([n]) },
         { tag: SMCF.TAG.IV, value: iv },
@@ -451,7 +450,7 @@ function renderSplitResult(f: File, k: number, n: number, ots: Uint8Array | null
 // ===== 恢复：先密文，后分片 =====
 
 let ctBytes: Uint8Array | null = null
-let ctHeader: { k: number; n: number; name: string; size: number } | null = null
+let ctHeader: { k: number; n: number; size: number } | null = null
 let restoreOk: { name: string; data: Uint8Array } | null = null
 
 function showCtFile(f: File): void {
@@ -472,15 +471,14 @@ function showCtFile(f: File): void {
       const k = outer.chunks.get(SMCF.TAG.K)?.[0]
       const n = outer.chunks.get(SMCF.TAG.N)?.[0]
       if (!k || !n) throw new Error('密文缺少 k/n 参数')
-      const nm = outer.chunks.get(SMCF.TAG.FILENAME)
-      ctHeader = { k, n, name: nm ? new TextDecoder().decode(nm) : f.name, size: f.size }
-      // 密文文件名完全由文件内容控制，必须走 textContent，禁止 innerHTML 拼接
+      ctHeader = { k, n, size: f.size }
+      // 外层不再含任何内容物信息（旧版 0x01 FILENAME 已废止）：名称在解密后显示
       info.textContent = ''
       info.append(
-        el('b', '', ctHeader.name),
-        ` · ${fmtSize(ctHeader.size)} · 需要 `,
+        el('b', '', fmtSize(ctHeader.size)),
+        ` · 需要 `,
         el('b', '', `k=${ctHeader.k}`),
-        ` 片分片（共 n=${ctHeader.n}），在下面贴入或导入`,
+        ` 片分片（共 n=${ctHeader.n}）——内容物名称等元数据在解密后显示`,
       )
       refreshRestoreBtn()
     })
