@@ -123,6 +123,7 @@ body {
   color: var(--primary);
   background: var(--entry);
 }
+/* 日夜切换：与博客（PaperMod）同款——亮色显示月亮、暗色显示太阳，图标线条随文字色 */
 .theme-toggle {
   position: absolute;
   top: 1rem;
@@ -132,12 +133,19 @@ body {
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--entry);
+  color: var(--text);
   cursor: pointer;
-  font-size: 0.95rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   line-height: 1;
   transition: transform 0.15s ease;
 }
+.theme-toggle svg { display: block; }
 .theme-toggle:hover { transform: translateY(-2px); }
+[data-theme="dark"] .theme-toggle .moon { display: none; }
+[data-theme="light"] .theme-toggle .sun { display: none; }
 
 /* ===== Tab 切换（分段控件）===== */
 .tabs { display: flex; gap: 0.4rem; padding: 0.45rem; }
@@ -848,6 +856,15 @@ textarea:focus { outline: none; border-color: var(--primary); }
 .about-body { font-size: 0.88rem; }
 .about-body p { margin: 0.6rem 0; }
 .about-body a { color: var(--primary); }
+/* about 里再折叠一层「细节与原理」：简版留外面，长文收进来 */
+.about-detail {
+  margin: 0.7rem 0;
+  padding: 0.55rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.about-detail > summary { cursor: pointer; font-weight: 600; font-size: 0.85rem; color: var(--secondary); }
+.about-detail > .about-body { margin-top: 0.2rem; }
 
 .foot {
   text-align: center;

@@ -29,16 +29,19 @@
           <span class="badge">k-of-n Shamir</span>
           <span class="badge">零上传</span>
         </div>
-        <button id="themeToggle" class="theme-toggle" title="切换主题">🌗</button>
+        <button id="themeToggle" class="theme-toggle" title="切换主题" aria-label="切换主题">
+          <svg class="moon" xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+          <svg class="sun" xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+        </button>
       </header>
 
       <nav class="card tabs" aria-label="模式切换">
-        <button class="tab is-active" data-view="split" type="button">拆分</button>
-        <button class="tab" data-view="restore" type="button">恢复</button>
+        <button class="tab" data-view="split" type="button">拆分</button>
+        <button class="tab is-active" data-view="restore" type="button">恢复</button>
       </nav>
 
       <!-- ============ 拆分 ============ -->
-      <section id="view-split" class="view">
+      <section id="view-split" class="view" hidden>
         <div class="card">
           <h2>选择文件</h2>
           <div id="dropSplit" class="drop" tabindex="0">
@@ -138,7 +141,7 @@
       </section>
 
       <!-- ============ 恢复（先密文，后分片）============ -->
-      <section id="view-restore" class="view" hidden>
+      <section id="view-restore" class="view">
         <div class="card">
           <h2>① 选择密文文件</h2>
           <div id="dropCt" class="drop" tabindex="0">
@@ -174,13 +177,19 @@
       <details class="card about">
         <summary>这是什么？怎么用？</summary>
         <div class="about-body">
-          <p><b>拆分</b>：选择一个或多个文件（每个文件 = 一层），给每层设 k，选对齐层数，点「拆分」。得到 1 个密文 + n 个分片。密文随便放（网盘/U 盘/公共存储），n 个分片交给 n 个人（或自己多处保管）。</p>
-          <p><b>多层</b>：第 1 层是门槛最低的文件，第 2、3… 层套在它里面，需要更多片才能继续往下解。凑够第 1 层的 k 片只能拿到第 1 层；多凑几片才轮到第 2 层。</p>
-          <p><b>假文件</b>：只能加一层，且必定是最后一层。它长得和真文件一模一样，但拆分时"分片共享的密钥"和"加密用的密钥"不是同一把——所以就算凑够它标注的 k 片，插出来的密钥也打不开它，只能得到解密失败。它的 k 可以设到 n 以上（那样连凑都凑不齐）。同时密钥串会被补到 32（或 256）组：多出来的假密钥组没有对应密文，只是让人看不出里面到底套了几层。</p>
+          <p><b>拆分</b>：选一个或多个文件（每个文件 = 一层），给每层设 k，点「拆分」。得到 1 个密文 + n 个分片。密文随便放（网盘/U 盘/公共存储），n 个分片交给 n 个人（或自己多处保管）。</p>
           <p><b>恢复</b>：先选密文（会提示需要几片），再交出分片，点「恢复」。够哪一层的 k 就解到哪一层，不够的层会显示还差几片。</p>
-          <p><b>原理</b>：每一层各生成一个 32 字节随机 key，用 AES-256-GCM 加密该层明文；Shamir 秘密共享（secp256k1 基域 GF(p)，p = 2²⁵⁶−2³²−977）把每层的 key 拆成 k-of-n，所有层共用同一套坐标。所以分片极小，文件本身不分片。</p>
-          <p><b>隐私</b>：整页单文件、无后端、无统计，可另存到本地断网使用。唯一例外是勾选了 OpenTimestamps 存证（会把文件哈希发给公共日历）和点击「在线验证」（会向区块数据源查询）。</p>
-          <p>源码：<a href="https://github.com/tdstud1o/tool/tree/main/shamir" target="_blank" rel="noopener">tdstud1o/tool · shamir</a></p>
+          <p>多层嵌套、假文件、密码学原理……都收在下面的细节里，想深究再展开。</p>
+          <details class="about-detail">
+            <summary>细节与原理</summary>
+            <div class="about-body">
+              <p><b>多层</b>：第 1 层是门槛最低的文件，第 2、3… 层套在它里面，需要更多片才能继续往下解。凑够第 1 层的 k 片只能拿到第 1 层；多凑几片才轮到第 2 层。</p>
+              <p><b>假文件</b>：只能加一层，且必定是最后一层。它长得和真文件一模一样，但拆分时"分片共享的密钥"和"加密用的密钥"不是同一把——所以就算凑够它标注的 k 片，插出来的密钥也打不开它，只能得到解密失败。它的 k 可以设到 n 以上（那样连凑都凑不齐）。同时密钥串会被补到 32（或 256）组：多出来的假密钥组没有对应密文，只是让人看不出里面到底套了几层。</p>
+              <p><b>原理</b>：每一层各生成一个 32 字节随机 key，用 AES-256-GCM 加密该层明文；Shamir 秘密共享（secp256k1 基域 GF(p)，p = 2²⁵⁶−2³²−977）把每层的 key 拆成 k-of-n，所有层共用同一套坐标。所以分片极小，文件本身不分片。</p>
+              <p><b>隐私</b>：整页单文件、无后端、无统计，可另存到本地断网使用。唯一例外是勾选了 OpenTimestamps 存证（会把文件哈希发给公共日历）和点击「在线验证」（会向区块数据源查询）。</p>
+            </div>
+          </details>
+          <p>源码：<a href="https://github.com/tdstud1o/tool/tree/main/shamir" target="_blank" rel="noopener">tdstud1o/tool · shamir</a> · 博客：<a href="https://t1mmoc.github.io/posts/2026-10-18-shamir-click-and-go-live/" target="_blank" rel="noopener">没人砌的那堵墙，砌好了</a></p>
         </div>
       </details>
 

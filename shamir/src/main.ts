@@ -115,7 +115,7 @@ $<HTMLButtonElement>('themeToggle').addEventListener('click', () => {
 
 // ===== Tab 切换 =====
 
-// ===== Tab 切换（记住上次选中，刷新后恢复）=====
+// ===== Tab 切换（记住上次选中；第一次来默认「恢复」）=====
 
 function switchView(v: string): void {
   for (const t of document.querySelectorAll<HTMLButtonElement>('.tab'))
@@ -130,7 +130,8 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>('.tab'))
 
 try {
   const savedView = localStorage.getItem('shamir-view')
-  if (savedView === 'restore' || savedView === 'split') switchView(savedView)
+  // 上次用过 → 记住；第一次来 → 默认「恢复」
+  switchView(savedView === 'split' ? 'split' : 'restore')
 } catch { /* ignore */ }
 
 // ===== 运行状态：进度条 + 日志 + 控件禁用 =====
