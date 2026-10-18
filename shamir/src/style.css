@@ -469,6 +469,58 @@ textarea:focus { outline: none; border-color: var(--primary); }
 }
 .ct-info b { color: var(--primary); }
 
+/* ===== 恢复区：密文/分片列表 + 单行添加 ===== */
+.mini-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.7rem;
+}
+.mini-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--entry);
+  font-size: 0.85rem;
+}
+.mini-row.is-active { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.mini-row.is-active .mini-name { color: var(--primary); font-weight: 600; }
+.mini-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mini-meta { margin-left: auto; flex-shrink: 0; color: var(--secondary); font-size: 0.78rem; }
+.mini-row .share-btn { padding: 0.2rem 0.6rem; font-size: 0.75rem; }
+.mini-idx {
+  flex-shrink: 0;
+  min-width: 1.6rem;
+  font-weight: 700;
+  color: var(--primary);
+  font-size: 0.8rem;
+}
+.share-add-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+.share-add-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.5rem 0.75rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--entry);
+  color: var(--text);
+}
+.share-add-row input:focus { outline: none; border-color: var(--primary); }
+
 /* 忙碌时禁用交互（进度条/日志保持可滚动） */
 .drop.is-disabled,
 .file-label.is-disabled {

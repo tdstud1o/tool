@@ -2,16 +2,20 @@ import './style.css'
 import { SMCF, SMPK, tlvBuild, tlvParse, u64beBytes, beBytesToU64 } from './core/tlv.ts'
 import { IV_LEN, KEY_LEN, aesDecrypt, aesEncrypt, randomBytes, sha256 } from './core/crypto.ts'
 import { shamirSplit, shamirCombine } from './core/shamir.ts'
-import { checkConsistency, encodeShare, parseShares, type ShareEntry } from './core/format.ts'
+import { checkConsistency, encodeShare, parseShareLine, type ShareEntry } from './core/format.ts'
 import { otsStamp, parseOts, upgradePending, verifyAnchorOnline } from './core/ots.ts'
-import { toHex } from './core/b64.ts'
+import { bytesEq, toHex } from './core/b64.ts'
 
 // ===== 工具 =====
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T
 
 /** 安全构建元素：外部数据（文件名、回执 URI、API 响应、错误消息）一律走 textContent */
-function el(tag: string, cls: string, ...children: (Node | string)[]): HTMLElement {
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  cls: string,
+  ...children: (Node | string)[]
+): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag)
   if (cls) e.className = cls
   for (const c of children) e.append(c)
@@ -147,14 +151,18 @@ class Run {
 
 let splitFile: File | null = null
 
-function bindDrop(dropId: string, onFile: (f: File) => void): HTMLInputElement {
+function bindDrop(dropId: string, multiple: boolean, onFiles: (files: File[]) => void): HTMLInputElement {
   const drop = $(dropId)
   const input = document.createElement('input')
   input.type = 'file'
   input.hidden = true
+  input.multiple = multiple
   drop.addEventListener('click', () => { if (!drop.classList.contains('is-disabled')) input.click() })
   drop.addEventListener('keydown', (e) => e.key === 'Enter' && !drop.classList.contains('is-disabled') && input.click())
-  input.addEventListener('change', () => input.files![0] && onFile(input.files![0]))
+  input.addEventListener('change', () => {
+    if (input.files!.length) onFiles(Array.from(input.files!))
+    input.value = ''
+  })
   for (const ev of ['dragover', 'dragenter'] as const)
     drop.addEventListener(ev, (e) => {
       e.preventDefault()
@@ -165,8 +173,8 @@ function bindDrop(dropId: string, onFile: (f: File) => void): HTMLInputElement {
   drop.addEventListener('drop', (e) => {
     e.preventDefault()
     if (drop.classList.contains('is-disabled')) return
-    const f = e.dataTransfer?.files?.[0]
-    if (f) onFile(f)
+    const files = Array.from(e.dataTransfer?.files ?? [])
+    if (files.length) onFiles(files)
   })
   drop.after(input)
   return input
@@ -180,7 +188,9 @@ function showSplitFile(f: File): void {
   refreshSplitBtn()
 }
 
-const fileSplitInput = bindDrop('dropSplit', showSplitFile)
+const fileSplitInput = bindDrop('dropSplit', false, (files) => {
+  if (files[0]) showSplitFile(files[0])
+})
 
 const inK = $<HTMLInputElement>('inK')
 const inN = $<HTMLInputElement>('inN')
@@ -456,101 +466,189 @@ function renderSplitResult(f: File, k: number, n: number, ots: Uint8Array | null
   card.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
 }
 
-// ===== 恢复：先密文，后分片 =====
+// ===== 恢复：密文/分片统一入口（按内容自动分流）=====
 
-let ctBytes: Uint8Array | null = null
-let ctHeader: { k: number; n: number; size: number } | null = null
-let restoreOk: { name: string; data: Uint8Array } | null = null
-
-function showCtFile(f: File): void {
-  ctHeader = null
-  ctBytes = null
-  const drop = $('dropCt')
-  drop.classList.add('has-file')
-  $('dropCtText').textContent = `🔐 ${f.name} · ${fmtSize(f.size)}`
-  const info = $('ctInfo')
-  info.hidden = false
-  info.textContent = ''
-  info.append(el('span', 'ots-status pending', '解析密文头…'))
-  f.arrayBuffer()
-    .then(async (buf) => {
-      ctBytes = new Uint8Array(buf)
-      const outer = tlvParse(SMCF.MAGIC, ctBytes)
-      if (outer.version !== SMCF.VERSION) throw new Error(`不支持的密文版本 v${outer.version}`)
-      const k = outer.chunks.get(SMCF.TAG.K)?.[0]
-      const n = outer.chunks.get(SMCF.TAG.N)?.[0]
-      if (!k || !n) throw new Error('密文缺少 k/n 参数')
-      ctHeader = { k, n, size: f.size }
-      // 外层不再含任何内容物信息（旧版 0x01 FILENAME 已废止）：名称在解密后显示
-      info.textContent = ''
-      info.append(
-        el('b', '', fmtSize(ctHeader.size)),
-        ` · 需要 `,
-        el('b', '', `k=${ctHeader.k}`),
-        ` 片分片（共 n=${ctHeader.n}）——内容物名称等元数据在解密后显示`,
-      )
-      refreshRestoreBtn()
-    })
-    .catch((e) => {
-      ctBytes = ctHeader = null
-      info.textContent = ''
-      info.append(el('span', 'ots-status pending', `⚠️ ${e instanceof Error ? e.message : String(e)}`))
-      refreshRestoreBtn()
-    })
+interface CtEntry {
+  name: string
+  size: number
+  bytes: Uint8Array
+  k: number
+  n: number
 }
 
-const fileCtInput = bindDrop('dropCt', showCtFile)
+let ctEntries: CtEntry[] = []
+let activeCt: CtEntry | null = null
+const shareMap = new Map<number, ShareEntry>()
+let restoreOk: { name: string; data: Uint8Array } | null = null
 
-function currentShares(): ShareEntry[] | null {
-  try {
-    return parseShares($<HTMLTextAreaElement>('shareText').value)
-  } catch {
-    return null
+const SHARE_RE = /SHAMIR\d?:/
+
+/** 追加分片文本（多行），返回新增数与错误消息；同 index 内容冲突保留原片 */
+function importShareText(text: string): { added: number; errors: string[] } {
+  let added = 0
+  const errors: string[] = []
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) continue
+    try {
+      const entry = parseShareLine(line)
+      if (!entry) continue
+      const prev = shareMap.get(entry.index)
+      if (prev && (prev.k !== entry.k || prev.n !== entry.n || !bytesEq(prev.payload, entry.payload))) {
+        errors.push(`第 ${entry.index} 号分片内容冲突，已保留原片`)
+      } else if (!prev) {
+        shareMap.set(entry.index, entry)
+        added++
+      }
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err))
+    }
+  }
+  return { added, errors }
+}
+
+/** 摄取文件：.tsss/.smcf 或 SMCF 头 → 密文；含分片文本 → 逐片导入；其余报错 */
+async function ingestFiles(files: File[]): Promise<void> {
+  const info = $('ctInfo')
+  info.hidden = false
+  const messages: HTMLElement[] = []
+  for (const f of files) {
+    try {
+      const buf = new Uint8Array(await f.arrayBuffer())
+      let handled = false
+      try {
+        const outer = tlvParse(SMCF.MAGIC, buf)
+        if (outer.version !== SMCF.VERSION) throw new Error(`不支持的密文版本 v${outer.version}`)
+        const k = outer.chunks.get(SMCF.TAG.K)?.[0]
+        const n = outer.chunks.get(SMCF.TAG.N)?.[0]
+        if (!k || !n) throw new Error('密文缺少 k/n 参数')
+        const entry: CtEntry = { name: f.name, size: f.size, bytes: buf, k, n }
+        ctEntries.push(entry)
+        activeCt = entry
+        handled = true
+      } catch (ctErr) {
+        // 不是密文 → 尝试按分片文本处理；带密文扩展名却解析失败则直接报错
+        const text = new TextDecoder('utf-8', { fatal: false }).decode(buf)
+        if (!SHARE_RE.test(text)) {
+          if (/\.(tsss|smcf)$/i.test(f.name)) throw ctErr
+          throw new Error(`无法识别的文件（既不是密文也不含分片）`)
+        }
+        const { added, errors } = importShareText(text)
+        messages.push(
+          el('span', 'ots-status ' + (errors.length ? 'pending' : 'ok'),
+            `${f.name}：导入 ${added} 片${errors.length ? `；${errors.join('；')}` : ''}`),
+        )
+        renderShareList()
+      }
+      if (handled) messages.push(el('span', 'ots-status ok', `🔐 ${f.name}（${fmtSize(f.size)}）已加入密文列表`))
+    } catch (e) {
+      messages.push(el('span', 'ots-status pending', `⚠️ ${f.name}：${e instanceof Error ? e.message : String(e)}`))
+    }
+  }
+  info.textContent = ''
+  if (messages.length) info.append(...messages)
+  else info.hidden = true
+  renderCtList()
+  refreshRestoreBtn()
+}
+
+function renderCtList(): void {
+  const list = $('ctList')
+  list.textContent = ''
+  list.hidden = ctEntries.length === 0
+  for (const c of ctEntries) {
+    const row = el('div', 'mini-row' + (c === activeCt ? ' is-active' : ''))
+    const del = el('button', 'btn share-btn', '移除')
+    del.type = 'button'
+    del.addEventListener('click', (e) => {
+      e.stopPropagation()
+      ctEntries = ctEntries.filter((x) => x !== c)
+      if (activeCt === c) activeCt = ctEntries[ctEntries.length - 1] ?? null
+      renderCtList()
+      refreshRestoreBtn()
+    })
+    row.append(
+      el('span', 'mini-name', `🔐 ${c.name}`),
+      el('span', 'mini-meta', `${fmtSize(c.size)} · k=${c.k}/n=${c.n}`),
+      del,
+    )
+    row.addEventListener('click', () => {
+      activeCt = c
+      renderCtList()
+      refreshRestoreBtn()
+    })
+    list.append(row)
+  }
+}
+
+function renderShareList(): void {
+  const list = $('shareMiniList')
+  list.textContent = ''
+  const shares = [...shareMap.values()].sort((a, b) => a.index - b.index)
+  list.hidden = shares.length === 0
+  for (const s of shares) {
+    const row = el('div', 'mini-row')
+    const text = encodeShare(s.k, s.n, s.payload)
+    const del = el('button', 'btn share-btn', '移除')
+    del.type = 'button'
+    del.addEventListener('click', () => {
+      shareMap.delete(s.index)
+      renderShareList()
+      refreshRestoreBtn()
+    })
+    row.append(
+      el('span', 'mini-idx', `#${s.index}`),
+      el('span', 'mini-name', text.slice(0, 60) + (text.length > 60 ? '…' : '')),
+      del,
+    )
+    list.append(row)
   }
 }
 
 function refreshRestoreBtn(): void {
-  const ta = $<HTMLTextAreaElement>('shareText')
   const status = $('shareStatus')
-  const shares = currentShares()
   const btn = $<HTMLButtonElement>('btnRestore')
 
-  if (!ctHeader) {
-    status.textContent = shares ? `已识别 ${shares.length} 片 — 请先选择密文文件` : ''
+  if (!activeCt) {
+    status.textContent = shareMap.size ? `已导入 ${shareMap.size} 片 — 请先选择密文文件` : ''
     btn.disabled = true
     return
   }
-  if (!shares) {
-    status.textContent = ta.value.trim() ? '分片格式不对（应为 SHAMIR1:k:n:base64）' : ''
+  const { k, n } = activeCt
+  const shares = [...shareMap.values()]
+  const bad = shares.find((s) => s.k !== k || s.n !== n)
+  if (bad) {
+    status.textContent = `⚠️ 有分片 k/n (${bad.k}/${bad.n}) 与密文 (${k}/${n}) 不一致`
     btn.disabled = true
     return
   }
-  const { k, n } = ctHeader
-  const ks = new Set(shares.map((s) => s.k))
-  const ns = new Set(shares.map((s) => s.n))
-  if (ks.size > 1 || ns.size > 1) {
-    status.textContent = '⚠️ 各分片 k/n 不一致，可能不是同一批拆出来的'
-    btn.disabled = true
-    return
-  }
-  if (shares[0]!.k !== k || shares[0]!.n !== n) {
-    status.textContent = `⚠️ 分片 k/n (${shares[0]!.k}/${shares[0]!.n}) 与密文 (${k}/${n}) 不一致`
-    btn.disabled = true
-    return
-  }
-  status.textContent = `已识别 ${shares.length} 片（k=${k}，n=${n}${shares.length >= k ? '，够用 ✓' : `，还差 ${k - shares.length} 片`}）`
+  status.textContent = `已导入 ${shares.length} 片（k=${k}，n=${n}${shares.length >= k ? '，够用 ✓' : `，还差 ${k - shares.length} 片`}）`
   btn.disabled = shares.length < k
 }
 
-$<HTMLTextAreaElement>('shareText').addEventListener('input', refreshRestoreBtn)
+const fileCtInput = bindDrop('dropCt', true, (files) => void ingestFiles(files))
+
+function addShareFromInput(): void {
+  const input = $<HTMLInputElement>('shareInput')
+  if (!input.value.trim()) return
+  importShareText(input.value)
+  input.value = ''
+  input.focus() // 回车/添加后焦点回到输入框，继续贴下一条
+  renderShareList()
+  refreshRestoreBtn()
+}
+
+$<HTMLButtonElement>('btnAddShare').addEventListener('click', addShareFromInput)
+$<HTMLInputElement>('shareInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    addShareFromInput()
+  }
+})
 
 $<HTMLInputElement>('shareFiles').addEventListener('change', async (e) => {
   const files = (e.target as HTMLInputElement).files
-  if (!files) return
-  const parts: string[] = [$<HTMLTextAreaElement>('shareText').value]
-  for (const f of files) parts.push(await f.text())
-  $<HTMLTextAreaElement>('shareText').value = parts.join('\n')
-  refreshRestoreBtn()
+  if (files?.length) await ingestFiles(Array.from(files))
   ;(e.target as HTMLInputElement).value = ''
 })
 
@@ -558,14 +656,16 @@ const restoreRun = new Run('restoreLog', 'restoreProg', [
   {
     disable: () => {
       $<HTMLButtonElement>('btnRestore').disabled = true
-      $<HTMLTextAreaElement>('shareText').disabled = true
+      $<HTMLInputElement>('shareInput').disabled = true
+      $<HTMLButtonElement>('btnAddShare').disabled = true
       $<HTMLInputElement>('shareFiles').disabled = true
       fileCtInput.disabled = true
       $('dropCt').classList.add('is-disabled')
       $<HTMLInputElement>('shareFiles').closest('.file-label')?.classList.add('is-disabled')
     },
     restore: () => {
-      $<HTMLTextAreaElement>('shareText').disabled = false
+      $<HTMLInputElement>('shareInput').disabled = false
+      $<HTMLButtonElement>('btnAddShare').disabled = false
       $<HTMLInputElement>('shareFiles').disabled = false
       fileCtInput.disabled = false
       $('dropCt').classList.remove('is-disabled')
@@ -583,16 +683,16 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
   try {
     run.line('解析分片…')
     run.prog(10)
-    const shares = parseShares($<HTMLTextAreaElement>('shareText').value)
-    checkConsistency(shares, ctHeader!.k, ctHeader!.n)
+    const shares = [...shareMap.values()].sort((a, b) => a.index - b.index)
+    checkConsistency(shares, activeCt!.k, activeCt!.n)
 
     run.line('重放 Shamir 合并密钥…')
     run.prog(35)
     const key = await shamirCombine(shares.slice(0, shares[0]!.k).map((s) => s.payload))
 
-    run.line(`AES-256-GCM 解密（${fmtSize(ctBytes!.length)}）…`)
+    run.line(`AES-256-GCM 解密（${fmtSize(activeCt!.bytes.length)}）…`)
     run.prog(60)
-    const outer = tlvParse(SMCF.MAGIC, ctBytes!)
+    const outer = tlvParse(SMCF.MAGIC, activeCt!.bytes)
     const iv = outer.chunks.get(SMCF.TAG.IV)
     const ct = outer.chunks.get(SMCF.TAG.CIPHERTEXT)
     if (!iv || iv.length !== IV_LEN) throw new Error('密文缺少 IV 或长度不对')

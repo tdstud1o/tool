@@ -16,7 +16,7 @@ export function encodeShare(k: number, n: number, share: Uint8Array): string {
   return `SHAMIR1:${k}:${n}:${toB64(share)}`
 }
 
-function parseShareLine(line: string): ShareEntry | null {
+export function parseShareLine(line: string): ShareEntry | null {
   const m = SHARE_RE.exec(line.trim())
   if (!m) return null
   const k = Number(m[1])

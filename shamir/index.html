@@ -92,12 +92,17 @@
         <div class="card">
           <h2>① 选择密文文件</h2>
           <div id="dropCt" class="drop" tabindex="0">
-            <span id="dropCtText">拖密文（.tsss）到这里，或点击选择</span>
+            <span id="dropCtText">拖入密文（.tsss）或分片文本（可多选），或点击选择</span>
           </div>
+          <div id="ctList" class="mini-list" hidden></div>
           <div id="ctInfo" class="ct-info" hidden></div>
 
           <h2>② 导入分片</h2>
-          <textarea id="shareText" rows="5" spellcheck="false" placeholder="把分片文本贴进来，每行一条：SHAMIR1:k:n:base64…"></textarea>
+          <div id="shareMiniList" class="mini-list" hidden></div>
+          <div class="share-add-row">
+            <input id="shareInput" type="text" spellcheck="false" placeholder="输入或粘贴一条分片：SHAMIR1:k:n:base64…，回车添加" />
+            <button id="btnAddShare" class="btn btn-ghost" type="button">添加</button>
+          </div>
           <label class="btn btn-ghost file-label">从文件导入分片
             <input id="shareFiles" type="file" multiple accept=".txt,.share,.shares,text/plain" hidden />
           </label>
