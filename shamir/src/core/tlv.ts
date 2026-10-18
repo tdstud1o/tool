@@ -62,12 +62,19 @@ export function tlvParse(magic: string, b: Uint8Array): TlvFile {
 // TLV tag 注册表（语义编号，一旦发布冻结，禁止改义/回收复用；加新字段挑空号）
 //   TSCF: 0x01 FILENAME（已废止：v1.2 起不再写入，解析时视为未知 tag 跳过）
 //         | 0x02 K（必需）| 0x03 N（可选：仅单层密文写入，多层链一律不写）
-//         | 0x04 IV | 0x05 CIPHERTEXT（末块）| 0x06-0xFF 空闲
+//         | 0x04 IV | 0x05 CIPHERTEXT | 0x06-0xFF 空闲
 //   TSPK: 0x01 FILENAME（可选）| 0x04 CREATED_AT（可选）| 0x05 MIME（可选）| 0x06 NOTE（预留未用）
 //         | 0x07 SHA256 | 0x08 ALGO（1B：0=不压缩, 1=zstd L3, 2=gzip 原生, 3=zstd L19；缺失=0）
-//         | 0x11 DATA（末块，ALGO≠0 时为压缩字节流）| 0x12 OTS_RECEIPT
-//         | 0x13 NEXT（完整的下一层 TSCF 字节；缺失 = 这是最后一层）| 0x14-0xFF 空闲
+//         | 0x11 DATA（ALGO≠0 时为压缩字节流）| 0x12 OTS_RECEIPT
+//         | 0x13 NEXT（完整的下一层 TSCF 字节，末块；缺失 = 这是最后一层）
 //   0x02/0x03 在 TSPK 中为两层拆分前的历史空洞，与 TSCF 的 K/N 含义无关。
+//
+// 为什么 NEXT 放在 TSPK（解密后才看得到的内层）而不是 TSCF（明文外层）：
+//   "这套文件一共分了几层"本身就是元数据。放在外层的话，任何人拿到密文
+//   不用密钥就能顺着块头数出层数、甚至逐层量出各层大小；放进内层后，
+//   外层剩下的可读信息只有 K（这一层要几片）与 12B IV，别的一概看不到。
+//   代价是必须解开当前层才知道还有没有下一层——恢复本来就是逐层进行的，
+//   所以这个代价为零。
 
 export const TSCF = {
   MAGIC: 'TSCF',
@@ -76,9 +83,8 @@ export const TSCF = {
     K: 0x02, // 4B 大端阈值（无密钥可读，用于与分片交叉校验）
     N: 0x03, // 4B 大端总片数；只写在单层密文上（多层链不写，恢复端也就无从得知 n）
     IV: 0x04, // 12B
-    CIPHERTEXT: 0x05, // AES-256-GCM(key, TSPK 包)，必须，最后一个块
+    CIPHERTEXT: 0x05, // AES-256-GCM(key, TSPK 包)
   },
-  LAST_TAG: 0x05,
 } as const
 
 // ===== 内层：TSPK 载荷包（解密后才能读到，承载原数据 + 元数据 + 存证/签名）=====
@@ -93,11 +99,12 @@ export const TSPK = {
     NOTE: 0x06, // utf-8 备注
     SHA256: 0x07, // 原始 DATA 的 SHA-256（32B）
     ALGO: 0x08, // 1B：DATA 压缩算法（0=不压缩, 1=zstd L3, 2=gzip, 3=zstd L19；缺失=0）
-    DATA: 0x11, // 原文件数据（ALGO≠0 时为压缩流），约定最后一个块
+    DATA: 0x11, // 原文件数据（ALGO≠0 时为压缩流）；无 NEXT 时是末块
     OTS_RECEIPT: 0x12, // OpenTimestamps .ots 回执原文
-    NEXT: 0x13, // 完整的下一层 TSCF 字节（多层级密文链）；缺失 = 最后一层
+    NEXT: 0x13, // 下一层的完整 TSCF 字节；末块，缺失 = 最后一层
     // 未来扩展（签名、KDF 等）直接加新 tag，旧版解析器自动跳过
   },
+  /** 无 NEXT 时的末块；有 NEXT（0x13 > 0x11）时由调用方显式指定 */
   LAST_TAG: 0x11,
 } as const
 

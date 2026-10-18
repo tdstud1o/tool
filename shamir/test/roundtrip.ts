@@ -5,7 +5,7 @@ import { shamirSplit, shamirSplitMulti, shamirCombine, readY } from '../src/core
 import { fakeK, kPattern, nextK, padKs, sizeStats } from '../src/core/levels.ts'
 import { toB64 } from '../src/core/b64.ts'
 import { MAX_SHARES, P, bytesToField, randomFieldBytes } from '../src/core/gfp.ts'
-import { encodeShare, parseShareLine, parseShares, checkConsistency } from '../src/core/format.ts'
+import { coordText, encodeShare, parseShareLine, parseShares, checkConsistency } from '../src/core/format.ts'
 import { parseOts, isAllowedCalendarUri } from '../src/core/ots.ts'
 import { bytesEq, cat, toHex } from '../src/core/b64.ts'
 
@@ -80,7 +80,7 @@ const outer = tlvBuild(
     { tag: TSCF.TAG.N, value: new Uint8Array([5]) },
     { tag: 0x77, value: new Uint8Array([1, 2, 3]) }, // 未知 tag，解析器必须跳过
   ],
-  { lastTag: TSCF.LAST_TAG },
+  { lastTag: TSCF.TAG.CIPHERTEXT },
 )
 const back = tlvParse(TSCF.MAGIC, outer)
 check('TSCF magic/version', back.version === 1)
@@ -117,11 +117,11 @@ const ctFile = tlvBuild(TSCF.MAGIC, TSCF.VERSION, [
   { tag: TSCF.TAG.N, value: new Uint8Array([5]) },
   { tag: TSCF.TAG.IV, value: iv },
   { tag: TSCF.TAG.CIPHERTEXT, value: ct },
-], { lastTag: TSCF.LAST_TAG })
+], { lastTag: TSCF.TAG.CIPHERTEXT })
 
 // —— 模拟恢复侧 ——
 const { shares, xs } = await shamirSplit(key, 5, 3)
-const texts = shares.map((s, i) => encodeShare({ index: xs[i]!, levels: [{ k: 3, payload: s }] }))
+const texts = shares.map((s, i) => encodeShare({ index: xs[i]!, wide: false, levels: [{ k: 3, payload: s }] }))
 const parsed = parseShares(texts.join('\n'))
 const ks0 = checkConsistency(parsed, 3)
 const k = ks0[0]!
@@ -201,7 +201,7 @@ const big = await shamirSplit(key, 300, 5)
 check('n=300 每组仍恒 32 字节', big.shares.every((s) => s.length === 32))
 check('n=300 坐标占 1..300 且互异', big.xs.length === 300 && new Set(big.xs).size === 300 && big.xs.every((v) => v >= 1 && v <= 300))
 const bigParsed = parseShares(
-  big.shares.map((s, i) => encodeShare({ index: big.xs[i]!, levels: [{ k: 5, payload: s }] })).join('\n'),
+  big.shares.map((s, i) => encodeShare({ index: big.xs[i]!, wide: false, levels: [{ k: 5, payload: s }] })).join('\n'),
 )
 check('n=300 解析出 300 个互异坐标', bigParsed.length === 300 && new Set(bigParsed.map((s) => s.index)).size === 300)
 check('n=300 坐标落在 1..300', bigParsed.every((s) => s.index >= 1 && s.index <= 300))
@@ -328,6 +328,22 @@ check('多层分片解析出 3 组', mp.length === 7 && mp.every((s) => s.levels
 check('多层各组 k 正确', mp.every((s) => s.levels.map((l) => l.k).join('/') === '2/4/6'))
 check('多层共用一个坐标（x 只在文本里出现一次）', mp.every((s, i) => s.index === multi.xs[i]))
 check('多层 k 一致性校验通过', checkConsistency(mp, 2).join('/') === '2/4/6')
+
+// 9b) 坐标：单层紧凑（1..n），多层定宽随机（不泄露 n）
+check('coordText 单层不补零', coordText(7, false) === '7')
+check('coordText 多层补到 8 位', coordText(7, true) === '00000007')
+check('多层拆分标记 wide', multi.wide === true)
+check(
+  '多层坐标落在 [1, MAX_SHARES] 且远不只是 1..n',
+  multi.xs.every((x) => x >= 1 && x <= MAX_SHARES) && multi.xs.some((x) => x > 1000),
+)
+const single = await shamirSplit(keyA, 5, 3)
+check(
+  '单层仍是 1..n 紧凑坐标',
+  single.wide === false && [...single.xs].sort((a, b) => a - b).join(',') === '1,2,3,4,5',
+)
+check('8 位补零坐标可解析且数值不变', parseShareLine(`TSK1:00000007:3:${toB64(keyA)}`)?.index === 7)
+check('补零坐标解析后标记 wide', parseShareLine(`TSK1:00000007:3:${toB64(keyA)}`)?.wide === true)
 check('第 1 层 2 片还原 keyA', bytesEq(
   await shamirCombine(mp.slice(0, 2).map((s) => s.levels[0]!.payload), mp.slice(0, 2).map((s) => s.index)),
   keyA,
@@ -378,8 +394,24 @@ check('诱饵组：没有秘密也能拆，y 照样是 32 字节随机值', awai
   )
 })())
 
-// 10) 密文链：TSPK 0x13 原样嵌套下一层的 TSCF
+// 10) 密文链：NEXT 在 TSPK 内层，且是末块
+/** 按物理顺序读出 tag 序列（不做排序），用来断言块的真实排布 */
+function tagOrder(b: Uint8Array): number[] {
+  const out: number[] = []
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength)
+  let off = 5
+  while (off + 5 <= b.length) {
+    const tag = b[off]!
+    const len = dv.getUint32(off + 1, false)
+    out.push(tag)
+    off += 5 + len
+  }
+  return out
+}
+
+const ivA = randomBytes(12)
 const ivB = randomBytes(12)
+// 最深层：内层没有 NEXT
 const innerB = tlvBuild(TSPK.MAGIC, TSPK.VERSION, [{ tag: TSPK.TAG.DATA, value: new TextEncoder().encode('B') }], {
   lastTag: TSPK.TAG.DATA,
 })
@@ -392,20 +424,39 @@ const tscfB = tlvBuild(
     { tag: TSCF.TAG.IV, value: ivB },
     { tag: TSCF.TAG.CIPHERTEXT, value: await aesEncrypt(keyB, ivB, innerB) },
   ],
-  { lastTag: TSCF.LAST_TAG },
+  { lastTag: TSCF.TAG.CIPHERTEXT },
 )
+// 上一层：下一层的整段 TSCF 塞进内层最后一块，再整体加密
 const innerA = tlvBuild(
   TSPK.MAGIC,
   TSPK.VERSION,
   [
     { tag: TSPK.TAG.FILENAME, value: new TextEncoder().encode('a.bin') },
-    { tag: TSPK.TAG.NEXT, value: tscfB },
     { tag: TSPK.TAG.DATA, value: new TextEncoder().encode('A') },
+    { tag: TSPK.TAG.NEXT, value: tscfB },
   ],
-  { lastTag: TSPK.TAG.DATA },
+  { lastTag: TSPK.TAG.NEXT },
+)
+const tscfA = tlvBuild(
+  TSCF.MAGIC,
+  TSCF.VERSION,
+  [
+    { tag: TSCF.TAG.K, value: u32beBytes(3) },
+    { tag: TSCF.TAG.IV, value: ivA },
+    { tag: TSCF.TAG.CIPHERTEXT, value: await aesEncrypt(keyA, ivA, innerA) },
+  ],
+  { lastTag: TSCF.TAG.CIPHERTEXT },
 )
 const packA = tlvParse(TSPK.MAGIC, innerA)
-check('0x13 NEXT 原样保存下一层密文', bytesEq(packA.chunks.get(TSPK.TAG.NEXT)!, tscfB))
+const packOuter = tlvParse(TSCF.MAGIC, tscfA)
+check('0x13 NEXT 在内层并原样保存下一层密文', bytesEq(packA.chunks.get(TSPK.TAG.NEXT)!, tscfB))
+check('内层块序 FILENAME→DATA→NEXT，NEXT 垫底', tagOrder(innerA).join(',') === '1,17,19')
+check('外层只剩 K→IV→CIPHERTEXT，不暴露链结构', tagOrder(tscfA).join(',') === '2,4,5')
+check(
+  '外层出现 0x13 时说明写错了层',
+  packOuter.chunks.get(0x13) === undefined,
+)
+check('内层 DATA 不再是末块但有完整长度', packA.chunks.get(TSPK.TAG.DATA)!.length === 1)
 check('嵌套的 TSCF 可独立解析', (() => {
   const n = tlvParse(TSCF.MAGIC, packA.chunks.get(TSPK.TAG.NEXT)!)
   let k = 0
@@ -416,11 +467,8 @@ check('多层链里的 TSCF 不含 N，解析端不依赖它', (() => {
   const n = tlvParse(TSCF.MAGIC, tscfB)
   return n.chunks.get(TSCF.TAG.N) === undefined && n.chunks.get(TSCF.TAG.K) !== undefined
 })())
-check('DATA 仍排在 NEXT 之后（末块）', (() => {
-  const iData = innerA.length - 1
-  return innerA[iData] !== 0x13 && packA.chunks.get(TSPK.TAG.DATA)!.length === 1
-})())
-
+check('最深层内层没有 NEXT（DATA 仍垫底）', tagOrder(innerB).join(',') === '17')
+check('单层密文的末块仍是 CIPHERTEXT', tagOrder(tscfB).join(',') === '2,4,5')
 // 11) 假层 k 与密钥串对齐（诱饵组）
 check('nextK：只有一个真层时 +1', nextK([3]) === 4)
 check('nextK：等差序列顺着走（3,4 → 5）', nextK([3, 4]) === 5)

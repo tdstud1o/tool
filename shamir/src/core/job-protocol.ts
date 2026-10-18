@@ -44,6 +44,8 @@ export interface SplitDoneReply {
   m: number
   /** 每人一个坐标，顺序与 buffer 里的人员顺序一致 */
   xs: number[]
+  /** 坐标是否按定宽 8 位写（组数 > 1 时为 true） */
+  wide: boolean
 }
 
 export interface CombineDoneReply {

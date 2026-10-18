@@ -62,14 +62,22 @@ export async function splitInWorker(
   n: number,
   ks: number[],
   onProgress?: JobProgress,
-): Promise<{ buffer: ArrayBuffer; shareLen: number; count: number; m: number; xs: number[] }> {
-  const { buffer, shareLen, m, xs } = await run<{
+): Promise<{
+  buffer: ArrayBuffer
+  shareLen: number
+  count: number
+  m: number
+  xs: number[]
+  wide: boolean
+}> {
+  const { buffer, shareLen, m, xs, wide } = await run<{
     buffer: ArrayBuffer
     shareLen: number
     m: number
     xs: number[]
+    wide: boolean
   }>({ type: 'split', secrets, n, ks }, onProgress)
-  return { buffer, shareLen, count: buffer.byteLength / shareLen, m, xs }
+  return { buffer, shareLen, count: buffer.byteLength / shareLen, m, xs, wide }
 }
 
 /** 在后台线程恢复；xs 与 shares 一一对应 */

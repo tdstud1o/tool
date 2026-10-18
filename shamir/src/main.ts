@@ -4,7 +4,14 @@ import { ALGO, ALGO_LABEL, compressData, decompressData, type AlgoId } from './c
 import { IV_LEN, KEY_LEN, aesDecrypt, aesEncrypt, randomBytes, sha256 } from './core/crypto.ts'
 import { splitInWorker, combineInWorker } from './core/jobs.ts'
 import { MAX_SHARES, randomFieldBytes } from './core/gfp.ts'
-import { SHARE_PREFIX, checkConsistency, parseShareLine, sameLevels, type ShareEntry } from './core/format.ts'
+import {
+  SHARE_PREFIX,
+  checkConsistency,
+  coordText,
+  parseShareLine,
+  sameLevels,
+  type ShareEntry,
+} from './core/format.ts'
 import { FAKE_NAME, fakeK, padKs, randSize, sizeStats, type LevelPlan } from './core/levels.ts'
 import {
   OtsNoCorsError,
@@ -776,6 +783,9 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
     for (let i = chain - 1; i >= 0; i--) {
       const p = payloads[i]!
       const iv = randomBytes(IV_LEN)
+      // 下一层的整段 TSCF 放在**内层**最后一块：链结构属于元数据，
+      // 跟着载荷一起被加密。外层因此只剩 K + IV + 密文，看不出这套有几层。
+      const nextLayer = nested
       const chunks = [
         { tag: TSPK.TAG.FILENAME, value: new TextEncoder().encode(p.name) },
         { tag: TSPK.TAG.CREATED_AT, value: u64beBytes(now) },
@@ -783,25 +793,23 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
         ...(p.mime ? [{ tag: TSPK.TAG.MIME, value: new TextEncoder().encode(p.mime) }] : []),
         { tag: TSPK.TAG.ALGO, value: new Uint8Array([p.algo]) },
         ...(p.ots ? [{ tag: TSPK.TAG.OTS_RECEIPT, value: p.ots }] : []),
-        ...(nested ? [{ tag: TSPK.TAG.NEXT, value: nested }] : []),
         { tag: TSPK.TAG.DATA, value: p.stored },
+        ...(nextLayer ? [{ tag: TSPK.TAG.NEXT, value: nextLayer }] : []),
       ]
-      const inner = tlvBuild(TSPK.MAGIC, TSPK.VERSION, chunks, { lastTag: TSPK.TAG.DATA })
+      const inner = tlvBuild(TSPK.MAGIC, TSPK.VERSION, chunks, {
+        // 有 NEXT 时它是末块（0x13 > 0x11，排序后天然垫底）
+        lastTag: nextLayer ? TSPK.TAG.NEXT : TSPK.TAG.DATA,
+      })
       const ciphertext = await aesEncrypt(p.key, iv, inner)
-      nested = tlvBuild(
-        TSCF.MAGIC,
-        TSCF.VERSION,
-        [
-          { tag: TSCF.TAG.K, value: u32beBytes(ksChain[i]!) },
-          // n 只写在单层密文的这一层上。多层链里绝不写：那会让"总片数"这种
-          // 全局信息出现在每一层，既多占字节，又与"每层只暴露自己 k"的设想相悖。
-          // 代价是恢复端拿不到 n，不能断言 k > n（见恢复流程里的 nHere）。
-          ...(chain === 1 ? [{ tag: TSCF.TAG.N, value: u32beBytes(n) }] : []),
-          { tag: TSCF.TAG.IV, value: iv },
-          { tag: TSCF.TAG.CIPHERTEXT, value: ciphertext },
-        ],
-        { lastTag: TSCF.LAST_TAG },
-      )
+      nested = tlvBuild(TSCF.MAGIC, TSCF.VERSION, [
+        { tag: TSCF.TAG.K, value: u32beBytes(ksChain[i]!) },
+        // n 只写在单层密文的这一层上。多层链里绝不写：那会让"总片数"这种
+        // 全局信息出现在每一层，既多占字节，又与"每层只暴露自己 k"的设想相悖。
+        // 代价是恢复端拿不到 n，不能断言 k > n（见恢复流程里的 nHere）。
+        ...(chain === 1 ? [{ tag: TSCF.TAG.N, value: u32beBytes(n) }] : []),
+        { tag: TSCF.TAG.IV, value: iv },
+        { tag: TSCF.TAG.CIPHERTEXT, value: ciphertext },
+      ])
       run.prog(to + ((60 - to) * (chain - i)) / chain)
     }
     const outer = nested!
@@ -813,7 +821,7 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
     const secrets: (Uint8Array | null)[] = payloads.map((p) => p.splitKey)
     for (let i = 0; i < padCount; i++) secrets.push(null)
     const splitKs = [...plan.map((l) => Math.min(l.k, n)), ...ksAll.slice(chain)]
-    const { buffer, shareLen, count, xs } = await splitInWorker(
+    const { buffer, shareLen, count, xs, wide } = await splitInWorker(
       secrets,
       n,
       splitKs,
@@ -825,7 +833,7 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
     for (let i = 0; i < count; i++) {
       const base = i * shareLen
       // x 只写一次：TSK1:x:k1:y1:k2:y2…
-      const parts: string[] = [SHARE_PREFIX, String(xs[i])]
+      const parts: string[] = [SHARE_PREFIX, coordText(xs[i]!, wide)]
       for (let j = 0; j < total; j++) {
         parts.push(String(ksAll[j]), toB64(view.subarray(base + j * unitBytes, base + (j + 1) * unitBytes)))
       }
@@ -1098,7 +1106,7 @@ function renderCtList(): void {
 
 /** 把一条分片重新拼成文本（列表展示 / 复制用） */
 function shareTextOf(s: ShareEntry): string {
-  const parts = [SHARE_PREFIX, String(s.index)]
+  const parts = [SHARE_PREFIX, coordText(s.index, s.wide)]
   for (const lv of s.levels) parts.push(String(lv.k), toB64(lv.payload))
   return parts.join(':')
 }

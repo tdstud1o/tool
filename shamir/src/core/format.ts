@@ -6,6 +6,12 @@
 // x 只出现一次，每组只剩 32 字节的 y，所以一片的长度 ≈ 前缀 + m × 44 字符，
 // 与 n 的大小无关（旧格式每组还要多带 1~3 字节坐标，深链时白白放大几十倍）。
 //
+// x 有两种写法，语义相同、解析方式相同（都是十进制整数）：
+//   紧凑（单层）  "7"          最长 8 位，最短 1 位
+//   定宽（多层）  "04829173"   恒 8 位，左补零
+// 多层一律用定宽：x 若按 n 洗牌，它的位数就直接说明"这套一共几个人"。
+// 解析端不需要区分两者，Number() 会把补零读成同一个坐标。
+//
 // 一个密文里可以套多层（每层一个真文件，或唯一一个假文件），每层有独立的
 // AES key 与独立的阈值 k；所有层共用同一套坐标，所以一个人的分片里
 // 带齐了每一组的 y。末尾多出来的组是诱饵，没有对应密文。
@@ -17,6 +23,15 @@ import { readY } from './shamir.ts'
 /** 当前分片格式版本（前缀 TSK1） */
 export const SHARE_VERSION = 1
 export const SHARE_PREFIX = `TSK${SHARE_VERSION}`
+
+/** 定宽坐标的位数：MAX_SHARES = 16 777 215，正好 8 位 */
+export const WIDE_COORD_DIGITS = 8
+
+/** 坐标 → 文本：wide 时左补零到固定 8 位，让长度不泄露 n */
+export function coordText(index: number, wide: boolean): string {
+  const s = String(index)
+  return wide ? s.padStart(WIDE_COORD_DIGITS, '0') : s
+}
 
 // 前缀 + 坐标 + 至少一组 :k:base64
 const SHARE_RE = /^TSK(\d+):(\d+)((?::\d+:[A-Za-z0-9+/]+={0,2})+)$/
@@ -31,13 +46,15 @@ export interface ShareLevel {
 export interface ShareEntry {
   /** x 坐标（1..MAX_SHARES），同一片的所有组共用 */
   index: number
+  /** 坐标是否按定宽 8 位写（多层）；只影响复制/再导出时的写法 */
+  wide: boolean
   /** 从第 1 层（最外层）到最深层；后面可能跟着诱饵组 */
   levels: ShareLevel[]
 }
 
 export function encodeShare(entry: ShareEntry): string {
   if (entry.levels.length === 0) throw new Error('分片至少要有一组密钥材料')
-  const parts = [SHARE_PREFIX, String(entry.index)]
+  const parts = [SHARE_PREFIX, coordText(entry.index, entry.wide)]
   for (const lv of entry.levels) parts.push(String(lv.k), toB64(lv.payload))
   return parts.join(':')
 }
@@ -49,9 +66,10 @@ export function parseShareLine(line: string): ShareEntry | null {
   if (version !== SHARE_VERSION)
     throw new Error(`不支持的分片版本 TSK${version}（当前只认 ${SHARE_PREFIX}）`)
 
-  const index = Number(m[2])
+  const raw = m[2]!
+  const index = Number(raw)
   if (!Number.isInteger(index) || index < 1 || index > MAX_SHARES)
-    throw new Error(`分片坐标非法：x=${m[2]}`)
+    throw new Error(`分片坐标非法：x=${raw}`)
 
   // m[3] 形如 ":3:AAAA:5:BBBB"，split 后首项为空串
   const tok = m[3]!.split(':')
@@ -65,7 +83,7 @@ export function parseShareLine(line: string): ShareEntry | null {
     levels.push({ k, payload })
   }
   if (levels.length === 0) throw new Error('分片没有任何密钥材料')
-  return { index, levels }
+  return { index, wide: raw.length >= WIDE_COORD_DIGITS, levels }
 }
 
 /** 解析一段文本里的所有分片，同坐标重复内容不同时报错 */

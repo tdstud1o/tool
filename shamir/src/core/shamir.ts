@@ -2,8 +2,14 @@
 //
 // 分片布局（见 format.ts）：
 //   TSK1:x:k₁:y₁:k₂:y₂…      x 只写一次，每组只有 [y: 32 字节大端]
-// x 是坐标（1..n），y = f(x) 的 32 字节大端。一组密钥材料恒 32 字节，
+// x 是坐标，y = f(x) 的 32 字节大端。一组密钥材料恒 32 字节，
 // 与 n 大小无关；x 放在前缀里，省掉每组重复一份坐标。
+//
+// x 的取值分两种，取决于层数：
+//   m = 1（单层）   1..n 洗牌后分配，十进制直接写，最短（1~8 字符）
+//   m ≥ 2（多层）   [1, MAX_SHARES] 内随机，定宽 8 位十进制
+// 多层必须宽坐标：否则 x 的字节宽度（1B/2B/3B）会直接把 n 的数量级泄出去
+// ——"这套分片一共几个人"本身就是不该让持片人知道的信息。
 //
 // 多层：一个密文里套 m 层（TSCF 链），每层有自己的 key 与阈值 k，
 // 所有层共用同一套 x 坐标——所以一个人拿到的分片里带齐了 m 个 y。
@@ -63,12 +69,71 @@ export function readY(buf: Uint8Array): bigint {
  * 每组的载荷就是连续切片，主线程直接 slice → base64，不用再拼一次。
  * 坐标 x 不放进载荷，而是随结果数组返回，由分片文本写一次。
  */
+/**
+ * 多层用的宽坐标：在 [1, MAX_SHARES] 内不重复随机。
+ * 为什么不用洗牌 1..n：那样 x 的最大值就是 n，直接暴露总片数；
+ * 而 x 的十进制宽度又会被定宽成 8 位，两者叠加才真正看不出 n。
+ */
+function randomCoords(n: number): number[] {
+  const out = new Array<number>(n)
+  const seen = new Set<number>()
+  // getRandomValues 单次上限 65536 字节 → 每次最多 16384 个 uint32
+  const BATCH = 16384
+  const buf = new Uint32Array(BATCH)
+  let left = 0
+  let i = 0
+  // n 逼近 MAX_SHARES 时命中率会掉，给个硬上限避免空转
+  const maxTries = n * 64 + 4096
+  let tries = 0
+  while (i < n) {
+    if (++tries > maxTries)
+      throw new Error(`分片数 ${n.toLocaleString()} 太大，随机坐标凑不出足够的互异值`)
+    if (left === 0) {
+      crypto.getRandomValues(buf)
+      left = BATCH
+    }
+    // 取模偏差 ≤ n/2³²，对坐标分配无实际影响
+    const v = 1 + (buf[--left]! % MAX_SHARES)
+    if (seen.has(v)) continue
+    seen.add(v)
+    out[i++] = v
+  }
+  return out
+}
+
+/** 单层用的紧凑坐标：1..n 洗牌，让分片顺序与序号不对应 */
+function compactCoords(n: number): number[] {
+  const xs = Array.from({ length: n }, (_, i) => i + 1)
+  const rnd = new Uint32Array(n)
+  const CHUNK = 16384
+  for (let off = 0; off < n; off += CHUNK) {
+    const end = Math.min(n, off + CHUNK)
+    crypto.getRandomValues(rnd.subarray(off, end))
+  }
+  for (let i = n - 1; i > 0; i--) {
+    // 取模偏差 ≤ n/2³²，对坐标分配无实际影响
+    const j = rnd[i]! % (i + 1)
+    const t = xs[i]!
+    xs[i] = xs[j]!
+    xs[j] = t
+  }
+  return xs
+}
+
 export async function shamirSplitMulti(
   secrets: (Uint8Array | null)[],
   n: number,
   ks: number[],
   onProgress?: (done: number, total: number) => void,
-): Promise<{ buffer: Uint8Array; shareLen: number; count: number; m: number; xs: number[] }> {
+): Promise<{
+  buffer: Uint8Array
+  shareLen: number
+  count: number
+  m: number
+  xs: number[]
+  /** x 是否按宽坐标（定宽 8 位十进制）编码 */
+  wide: boolean
+}> {
   const m = secrets.length
   if (m === 0) throw new Error('至少要有一个秘密')
   if (ks.length !== m) throw new Error('k 的数量必须与秘密数量一致')
@@ -106,21 +171,9 @@ export async function shamirSplitMulti(
       crypto.getRandomValues(scratch.subarray(off, Math.min(scratch.length, off + 65536)))
   }
 
-  const xs = Array.from({ length: n }, (_, i) => i + 1)
-  const rnd = new Uint32Array(n)
-  // getRandomValues 单次上限 65536 字节 → 每次最多 16384 个 uint32
-  const CHUNK = 16384
-  for (let off = 0; off < n; off += CHUNK) {
-    const end = Math.min(n, off + CHUNK)
-    crypto.getRandomValues(rnd.subarray(off, end))
-  }
-  for (let i = n - 1; i > 0; i--) {
-    // 取模偏差 ≤ n/2³²，对坐标分配无实际影响
-    const j = rnd[i]! % (i + 1)
-    const t = xs[i]!
-    xs[i] = xs[j]!
-    xs[j] = t
-  }
+  // 单层用紧凑坐标（1..n 洗牌），两层及以上一律宽坐标：
+  // 否则 x 的字节宽度会直接把 n 的数量级告诉持片人。
+  const xs = m > 1 ? randomCoords(n) : compactCoords(n)
 
   const unit = PAYLOAD_LEN
   const shareLen = unit * m
@@ -142,12 +195,12 @@ export async function shamirSplitMulti(
     if (onProgress && (i + 1) % step === 0) onProgress(i + 1, n)
   }
   onProgress?.(n, n)
-  return { buffer, shareLen, count: n, m, xs }
+  return { buffer, shareLen, count: n, m, xs, wide: m > 1 }
 }
 
 /**
  * 单层拆分（多层实现的薄包装，测试与旧调用方用）。
- * 坐标取 1..n 洗牌后分配；x 本身不是秘密，洗牌只是沿用旧行为，
+ * 只有一层，所以坐标是紧凑的 1..n 洗牌；x 本身不是秘密，洗牌只是
  * 让分片顺序与文件序号不对应。
  */
 export async function shamirSplit(
@@ -155,11 +208,11 @@ export async function shamirSplit(
   n: number,
   k: number,
   onProgress?: (done: number, total: number) => void,
-): Promise<{ shares: Uint8Array[]; xs: number[] }> {
-  const { buffer, shareLen, count, xs } = await shamirSplitMulti([secret], n, [k], onProgress)
+): Promise<{ shares: Uint8Array[]; xs: number[]; wide: boolean }> {
+  const { buffer, shareLen, count, xs, wide } = await shamirSplitMulti([secret], n, [k], onProgress)
   const shares: Uint8Array[] = new Array(count)
   for (let i = 0; i < count; i++) shares[i] = buffer.subarray(i * shareLen, (i + 1) * shareLen)
-  return { shares, xs }
+  return { shares, xs, wide }
 }
 
 /**
