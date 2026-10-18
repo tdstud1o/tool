@@ -1,5 +1,18 @@
+# 依赖与构建产物
 node_modules/
 dist/
-tmp/
+
+# 项目内临时目录：截图、e2e 产物、下载测试文件都放这里
+**/tmp/
+
+# 本机配置
 *.local
-shamir/*.png
+
+# 工具自动生成的调试快照（playwright-cli 等）
+.playwright-cli/
+
+# 助手工作区数据（含内部设计笔记，不进公开仓库）
+.workbuddy/
+
+# zipbench 是独立 git 仓库（本目录下），不作为本仓库内容跟踪
+zipbench/

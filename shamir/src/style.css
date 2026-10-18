@@ -40,6 +40,9 @@
 
 * { box-sizing: border-box; }
 
+/* hidden 属性必须压过任何 display 声明（.btn 的 inline-block 会盖掉 UA 的 [hidden]） */
+[hidden] { display: none !important; }
+
 /* 背景光斑：纯 CSS，无网络请求 */
 body::before {
   content: "";
@@ -305,6 +308,16 @@ textarea:focus { outline: none; border-color: var(--primary); }
   font-size: 0.8rem;
 }
 
+/* n 很大时只渲染前几十行，其余折叠成一行提示 */
+.share-more {
+  padding: 0.7rem 0.9rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm, 8px);
+  font-size: 0.82rem;
+  color: var(--secondary);
+  text-align: center;
+}
+
 .restore-ok { display: flex; align-items: center; gap: 1rem; }
 .ok-mark {
   flex-shrink: 0;
@@ -520,6 +533,26 @@ textarea:focus { outline: none; border-color: var(--primary); }
   color: var(--text);
 }
 .share-add-row input:focus { outline: none; border-color: var(--primary); }
+
+/* 从文件导入分片 + 恢复文件 同行 */
+.import-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.6rem;
+}
+.import-row .file-label { margin-top: 0; }
+
+/* 下载原文件 / 下载 ots 文件 同行 */
+.dl-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 0.9rem;
+}
+.dl-row .btn { margin: 0; }
 
 /* 忙碌时禁用交互（进度条/日志保持可滚动） */
 .drop.is-disabled,

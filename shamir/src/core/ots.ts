@@ -26,6 +26,14 @@ const OTS_HEADER_MAGIC = Uint8Array.from([
 const PENDING_TAG = Uint8Array.from([0x83, 0xdf, 0xe3, 0x0d, 0x2e, 0xf9, 0x0c, 0x8e])
 const BITCOIN_TAG = Uint8Array.from([0x05, 0x88, 0x96, 0x0d, 0x73, 0xd7, 0x19, 0x01])
 
+/**
+ * 把日历的裸 Timestamp 回执包装成标准 .ots（DetachedTimestampFile），
+ * 供官方工具/网页验证：magic(31B) + varuint(1) + OpSHA256(0x08) + fileDigest(32B) + 回执流
+ */
+export function toDetachedOts(receipt: Uint8Array, fileDigest: Uint8Array): Uint8Array {
+  return cat(OTS_HEADER_MAGIC, new Uint8Array([1, 0x08]), fileDigest, receipt)
+}
+
 const CALENDAR = 'https://a.pool.opentimestamps.org/digest'
 const BLOCK_SOURCE = 'https://mempool.space/api'
 

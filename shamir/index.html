@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src https://a.pool.opentimestamps.org https://*.opentimestamps.org https://mempool.space" />
+      content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; worker-src blob: data:; style-src 'unsafe-inline'; img-src data: blob:; connect-src https://a.pool.opentimestamps.org https://*.opentimestamps.org https://mempool.space data: blob:" />
     <meta name="description" content="任意文件 → n 个分片 + 1 个密文；凑齐任意 k 片 → 原文件回来。全程浏览器本地计算。" />
     <title>Shamir 文件分片 · 点击即用</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='0'%3E%3Cstop offset='0' stop-color='%232563eb'/%3E%3Cstop offset='1' stop-color='%237c3aed'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='3' y='3' width='26' height='26' rx='7' fill='url(%23g)'/%3E%3Cpath d='M16 9v6l4 4' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' fill='none'/%3E%3C/svg%3E" />
@@ -47,10 +47,19 @@
 
           <h2>② 设置 k / n</h2>
           <div class="kn-row">
-            <label>阈值 k（恢复所需最少片数）<input id="inK" type="number" min="2" max="255" value="3" /></label>
-            <label>总片数 n（分给几个人）<input id="inN" type="number" min="2" max="255" value="5" /></label>
+            <label>阈值 k（恢复所需最少片数）<input id="inK" type="number" min="2" max="16777215" value="3" /></label>
+            <label>总片数 n（分给几个人）<input id="inN" type="number" min="2" max="16777215" value="5" /></label>
           </div>
           <p class="hint">每人只需保管一片（几十字节）；密文可随便丢网盘，没有 k 片它毫无意义。</p>
+
+          <h2>③ 压缩（写在密文内，恢复时自动识别）</h2>
+          <div class="seg" id="zipSeg" role="radiogroup" aria-label="压缩算法">
+            <button type="button" data-algo="0">不压缩</button>
+            <button type="button" data-algo="1" class="is-active">zstd L3</button>
+            <button type="button" data-algo="2">gzip</button>
+            <button type="button" data-algo="3">zstd L19</button>
+          </div>
+          <p class="hint" id="zipHint">默认 zstd L3：文本/代码约省一半，速度近百 MB/s。已压缩的文件（jpg/zip/mp4）收益低于 1% 会自动跳过；L19 更小但慢 40 倍。</p>
 
           <label class="ots-opt">
             <input id="otsCheck" type="checkbox" />
@@ -60,12 +69,10 @@
           <button id="btnSplit" class="btn btn-primary" type="button" disabled>拆分</button>
           <div id="runProg" class="prog" hidden><div class="prog-bar"></div></div>
           <div id="runLog" class="run-log" hidden></div>
-          <div id="splitError" class="msg msg-error" hidden></div>
-          <div id="splitWarn" class="msg msg-warn" hidden></div>
         </div>
 
         <div id="resultCard" class="card" hidden>
-          <h2>③ 保存产物</h2>
+          <h2>④ 保存产物</h2>
           <div class="naming">
             <div class="seg" id="nameSeg" role="radiogroup" aria-label="产物命名">
               <button type="button" data-name="date">YYYYMMDD-文件名</button>
@@ -73,7 +80,7 @@
               <button type="button" data-name="uuid">UUID</button>
               <button type="button" data-name="custom">自定义</button>
             </div>
-            <input id="nameCustom" type="text" placeholder="自定义文件名（扩展名 .tsss 自动加）" hidden />
+            <input id="nameCustom" type="text" placeholder="自定义文件名（扩展名 .tscf 自动加）" hidden />
           </div>
           <div class="prod">
             <div class="prod-name" id="ctName">…</div>
@@ -92,26 +99,26 @@
         <div class="card">
           <h2>① 选择密文文件</h2>
           <div id="dropCt" class="drop" tabindex="0">
-            <span id="dropCtText">拖入密文（.tsss）或分片文本（可多选），或点击选择</span>
+            <span id="dropCtText">拖入密文（.tscf）或分片文本（可多选），或点击选择</span>
           </div>
           <div id="ctList" class="mini-list" hidden></div>
-          <div id="ctInfo" class="ct-info" hidden></div>
 
           <h2>② 导入分片</h2>
           <div id="shareMiniList" class="mini-list" hidden></div>
           <div class="share-add-row">
-            <input id="shareInput" type="text" spellcheck="false" placeholder="输入或粘贴一条分片：SHAMIR1:k:n:base64…，回车添加" />
+            <input id="shareInput" type="text" spellcheck="false" placeholder="输入或粘贴一条分片：TSK1:k:base64…，回车添加" />
             <button id="btnAddShare" class="btn btn-ghost" type="button">添加</button>
           </div>
-          <label class="btn btn-ghost file-label">从文件导入分片
-            <input id="shareFiles" type="file" multiple accept=".txt,.share,.shares,text/plain" hidden />
-          </label>
+          <div class="import-row">
+            <label class="btn btn-ghost file-label">从文件导入分片
+              <input id="shareFiles" type="file" multiple accept=".txt,.share,.shares,text/plain" hidden />
+            </label>
+            <button id="btnRestore" class="btn btn-primary" type="button" disabled>恢复文件</button>
+          </div>
           <div id="shareStatus" class="hint"></div>
 
-          <button id="btnRestore" class="btn btn-primary" type="button" disabled>恢复文件</button>
           <div id="restoreProg" class="prog" hidden><div class="prog-bar"></div></div>
           <div id="restoreLog" class="run-log" hidden></div>
-          <div id="restoreError" class="msg msg-error" hidden></div>
         </div>
 
         <div id="restoreCard" class="card" hidden>
@@ -125,7 +132,10 @@
           </div>
           <div id="hashLine" class="hash-line"></div>
           <div id="otsRestBox" class="ots-box" hidden></div>
-          <button class="btn btn-primary" id="btnDlRest" type="button">下载原文件</button>
+          <div class="dl-row">
+            <button class="btn btn-primary" id="btnDlRest" type="button">下载原文件</button>
+            <button class="btn btn-ghost" id="btnDlOts" type="button" hidden>下载 ots 文件</button>
+          </div>
         </div>
       </section>
 

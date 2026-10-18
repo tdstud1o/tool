@@ -1,4 +1,4 @@
-// 通用 TLV 容器（PNG/age 风格，支持向前扩展），SMCF 外层密文与 SMPK 内层载荷包共用
+// 通用 TLV 容器（PNG/age 风格，支持向前扩展），TSCF 外层密文与 TSPK 内层载荷包共用
 //
 //   magic(nB) + version(1B) + TLV 序列：tag(1B) + len(4B 大端) + value
 //
@@ -56,32 +56,33 @@ export function tlvParse(magic: string, b: Uint8Array): TlvFile {
   return { version, chunks }
 }
 
-// ===== 外层：SMCF 密文容器 =====
+// ===== 外层：TSCF 密文容器 =====
 // 外层 tag 编号 = 物理布局顺序（顺序读取无需跳转）：K → N → IV → CIPHERTEXT
 //
 // TLV tag 注册表（语义编号，一旦发布冻结，禁止改义/回收复用；加新字段挑空号）
-//   SMCF: 0x01 FILENAME（已废止：v1.2 起不再写入，解析时视为未知 tag 跳过）
-//         | 0x02 K | 0x03 N | 0x04 IV | 0x05 CIPHERTEXT（末块）| 0x06-0xFF 空闲
-//   SMPK: 0x01 FILENAME | 0x04 CREATED_AT | 0x05 MIME | 0x06 NOTE（预留未用）
-//         | 0x07 SHA256 | 0x11 DATA（末块）| 0x12 OTS_RECEIPT | 0x13-0xFF 空闲
-//   0x02/0x03 在 SMPK 中为两层拆分前的历史空洞，与 SMCF 的 K/N 含义无关。
+//   TSCF: 0x01 FILENAME（已废止：v1.2 起不再写入，解析时视为未知 tag 跳过）
+//         | 0x02 K（必需）| 0x03 N（可选）| 0x04 IV | 0x05 CIPHERTEXT（末块）| 0x06-0xFF 空闲
+//   TSPK: 0x01 FILENAME（可选）| 0x04 CREATED_AT（可选）| 0x05 MIME（可选）| 0x06 NOTE（预留未用）
+//         | 0x07 SHA256 | 0x08 ALGO（1B：0=不压缩, 1=zstd L3, 2=gzip 原生, 3=zstd L19；缺失=0）
+//         | 0x11 DATA（末块，ALGO≠0 时为压缩字节流）| 0x12 OTS_RECEIPT | 0x13-0xFF 空闲
+//   0x02/0x03 在 TSPK 中为两层拆分前的历史空洞，与 TSCF 的 K/N 含义无关。
 
-export const SMCF = {
-  MAGIC: 'SMCF',
+export const TSCF = {
+  MAGIC: 'TSCF',
   VERSION: 1,
   TAG: {
     K: 0x02, // 1B 阈值（无密钥可读，用于与分片交叉校验）
     N: 0x03, // 1B 总片数
     IV: 0x04, // 12B
-    CIPHERTEXT: 0x05, // AES-256-GCM(key, SMPK 包)，必须，最后一个块
+    CIPHERTEXT: 0x05, // AES-256-GCM(key, TSPK 包)，必须，最后一个块
   },
   LAST_TAG: 0x05,
 } as const
 
-// ===== 内层：SMPK 载荷包（解密后才能读到，承载原数据 + 元数据 + 存证/签名）=====
+// ===== 内层：TSPK 载荷包（解密后才能读到，承载原数据 + 元数据 + 存证/签名）=====
 
-export const SMPK = {
-  MAGIC: 'SMPK',
+export const TSPK = {
+  MAGIC: 'TSPK',
   VERSION: 1,
   TAG: {
     FILENAME: 0x01, // utf-8 原文件名
@@ -89,7 +90,8 @@ export const SMPK = {
     MIME: 0x05, // utf-8
     NOTE: 0x06, // utf-8 备注
     SHA256: 0x07, // 原始 DATA 的 SHA-256（32B）
-    DATA: 0x11, // 原始数据，约定最后一个块
+    ALGO: 0x08, // 1B：DATA 压缩算法（0=不压缩, 1=zstd L3, 2=gzip, 3=zstd L19；缺失=0）
+    DATA: 0x11, // 原文件数据（ALGO≠0 时为压缩流），约定最后一个块
     OTS_RECEIPT: 0x12, // OpenTimestamps .ots 回执原文
     // 未来扩展（签名、KDF 等）直接加新 tag，旧版解析器自动跳过
   },
@@ -100,6 +102,20 @@ export function u64beBytes(n: number): Uint8Array {
   const out = new Uint8Array(8)
   new DataView(out.buffer).setBigUint64(0, BigInt(n), false)
   return out
+}
+
+/** 大端无符号整数 → 固定 4 字节。k / n 用它（n 可到 16,777,215，一字节装不下） */
+export function u32beBytes(n: number): Uint8Array {
+  const out = new Uint8Array(4)
+  new DataView(out.buffer).setUint32(0, n, false)
+  return out
+}
+
+/** 大端无符号整数 → number，接受 1..4 字节（旧的单字节写法也能读） */
+export function beBytesToUint(b: Uint8Array): number {
+  let v = 0
+  for (const x of b) v = v * 256 + x
+  return v
 }
 
 export function beBytesToU64(b: Uint8Array): number {

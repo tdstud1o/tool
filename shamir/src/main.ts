@@ -1,16 +1,35 @@
 import './style.css'
-import { SMCF, SMPK, tlvBuild, tlvParse, u64beBytes, beBytesToU64 } from './core/tlv.ts'
+import { TSCF, TSPK, beBytesToU64, beBytesToUint, tlvBuild, tlvParse, u32beBytes, u64beBytes } from './core/tlv.ts'
+import { ALGO, ALGO_LABEL, compressData, decompressData, type AlgoId } from './core/compress.ts'
 import { IV_LEN, KEY_LEN, aesDecrypt, aesEncrypt, randomBytes, sha256 } from './core/crypto.ts'
-import { shamirSplit, shamirCombine } from './core/shamir.ts'
+import { splitInWorker, combineInWorker } from './core/jobs.ts'
+import { MAX_SHARES, randomFieldBytes } from './core/gfp.ts'
 import { checkConsistency, encodeShare, parseShareLine, type ShareEntry } from './core/format.ts'
-import { otsStamp, parseOts, upgradePending, verifyAnchorOnline } from './core/ots.ts'
+import { otsStamp, parseOts, toDetachedOts, upgradePending, verifyAnchorOnline } from './core/ots.ts'
 import { bytesEq, toHex } from './core/b64.ts'
+import { buildZip } from './core/zip.ts'
+
+/** 拆分结果里最多渲染多少行分片；超出部分折叠（n 可达十万级） */
+const SHARE_ROWS = 50
 
 // ===== 工具 =====
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T
 
-/** 安全构建元素：外部数据（文件名、回执 URI、API 响应、错误消息）一律走 textContent */
+/** 向指定日志框追加一行（非流程消息：导入结果、错误等），与 Run.line 同一处展示 */
+function logLine(boxId: string, text: string, cls = ''): void {
+  const box = $(boxId)
+  box.hidden = false
+  const d = new Date()
+  const t = [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map((x) => String(x).padStart(2, '0'))
+    .join(':')
+  const div = document.createElement('div')
+  if (cls) div.className = cls
+  div.textContent = `[${t}] ${text}`
+  box.append(div)
+  box.scrollTop = box.scrollHeight
+}
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   cls: string,
@@ -29,8 +48,8 @@ function fmtSize(n: number): string {
   return `${(n / 1024 ** 3).toFixed(2)} GB`
 }
 
-function download(name: string, data: Uint8Array): void {
-  const url = URL.createObjectURL(new Blob([data]))
+function download(name: string, data: Uint8Array | Blob): void {
+  const url = URL.createObjectURL(data instanceof Blob ? data : new Blob([data]))
   const a = document.createElement('a')
   a.href = url
   a.download = name
@@ -80,15 +99,23 @@ $<HTMLButtonElement>('themeToggle').addEventListener('click', () => {
 
 // ===== Tab 切换 =====
 
-for (const tab of document.querySelectorAll<HTMLButtonElement>('.tab')) {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach((t) => t.classList.remove('is-active'))
-    tab.classList.add('is-active')
-    const v = tab.dataset.view!
-    $('view-split').hidden = v !== 'split'
-    $('view-restore').hidden = v !== 'restore'
-  })
+// ===== Tab 切换（记住上次选中，刷新后恢复）=====
+
+function switchView(v: string): void {
+  for (const t of document.querySelectorAll<HTMLButtonElement>('.tab'))
+    t.classList.toggle('is-active', t.dataset.view === v)
+  $('view-split').hidden = v !== 'split'
+  $('view-restore').hidden = v !== 'restore'
+  try { localStorage.setItem('shamir-view', v) } catch { /* ignore */ }
 }
+
+for (const tab of document.querySelectorAll<HTMLButtonElement>('.tab'))
+  tab.addEventListener('click', () => switchView(tab.dataset.view!))
+
+try {
+  const savedView = localStorage.getItem('shamir-view')
+  if (savedView === 'restore' || savedView === 'split') switchView(savedView)
+} catch { /* ignore */ }
 
 // ===== 运行状态：进度条 + 日志 + 控件禁用 =====
 
@@ -147,6 +174,23 @@ class Run {
   }
 }
 
+/**
+ * 把后台线程的进度映射到进度条区间，并按每 10% 打一行日志。
+ * n 很大时 worker 会回调上百次，逐次写日志会把日志框刷爆。
+ */
+function stageProgress(run: Run, from: number, to: number, label: string): (done: number, total: number) => void {
+  let nextLog = 10
+  return (done, total) => {
+    const pct = total > 0 ? done / total : 1
+    run.prog(from + (to - from) * pct)
+    const mark = Math.floor(pct * 10) * 10
+    if (mark >= nextLog) {
+      nextLog = mark + 10
+      run.line(`${label} ${done.toLocaleString()} / ${total.toLocaleString()}（${Math.round(pct * 100)}%）`)
+    }
+  }
+}
+
 // ===== 拆分 =====
 
 let splitFile: File | null = null
@@ -198,7 +242,7 @@ const inN = $<HTMLInputElement>('inN')
 function readKn(): { k: number; n: number } | null {
   const k = Math.round(Number(inK.value))
   const n = Math.round(Number(inN.value))
-  if (!Number.isFinite(k) || !Number.isFinite(n) || k < 2 || n < 2 || n > 255 || k > n) return null
+  if (!Number.isFinite(k) || !Number.isFinite(n) || k < 2 || n < 2 || n > MAX_SHARES || k > n) return null
   return { k, n }
 }
 
@@ -206,11 +250,11 @@ function refreshSplitBtn(): void {
   $<HTMLButtonElement>('btnSplit').disabled = !splitFile || !readKn()
 }
 
-// k/n 联动：调高 k 时 n 跟随到 k；调低 n 时 k 跟随到 n（恒保证 2 ≤ k ≤ n ≤ 255）
+// k/n 联动：调高 k 时 n 跟随到 k；调低 n 时 k 跟随到 n（恒保证 2 ≤ k ≤ n ≤ MAX_SHARES）
 inK.addEventListener('input', () => {
   const k = Math.round(Number(inK.value))
   if (Number.isFinite(k)) {
-    const kc = Math.min(255, Math.max(2, k))
+    const kc = Math.min(MAX_SHARES, Math.max(2, k))
     if (String(kc) !== inK.value) inK.value = String(kc)
     if (Number(inN.value) < kc) inN.value = String(kc)
   }
@@ -219,7 +263,7 @@ inK.addEventListener('input', () => {
 inN.addEventListener('input', () => {
   const n = Math.round(Number(inN.value))
   if (Number.isFinite(n)) {
-    const nc = Math.min(255, Math.max(2, n))
+    const nc = Math.min(MAX_SHARES, Math.max(2, n))
     if (String(nc) !== inN.value) inN.value = String(nc)
     if (Number(inK.value) > nc) inK.value = String(nc)
   }
@@ -262,6 +306,30 @@ nameCustom.addEventListener('input', () => {
   try { localStorage.setItem('shamir-name-custom', nameCustom.value) } catch { /* ignore */ }
   renderProductNames()
 })
+// ===== 压缩算法选择（默认 zstd L3，记忆上次选择）=====
+const zipSeg = $('zipSeg')
+function currentAlgo(): AlgoId {
+  const active = zipSeg.querySelector<HTMLButtonElement>('button.is-active')
+  const v = Number(active?.dataset.algo ?? ALGO.ZSTD_L3)
+  return (v in ALGO_LABEL ? v : ALGO.ZSTD_L3) as AlgoId
+}
+try {
+  const raw = localStorage.getItem('shamir-zip-algo')
+  const saved = raw == null ? NaN : Number(raw)
+  if (saved in ALGO_LABEL) {
+    zipSeg.querySelectorAll<HTMLButtonElement>('button').forEach((b) => {
+      b.classList.toggle('is-active', Number(b.dataset.algo) === saved)
+    })
+  }
+} catch { /* ignore */ }
+zipSeg.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button')
+  if (!btn) return
+  zipSeg.querySelectorAll('button').forEach((b) => b.classList.remove('is-active'))
+  btn.classList.add('is-active')
+  try { localStorage.setItem('shamir-zip-algo', String(Number(btn.dataset.algo))) } catch { /* ignore */ }
+})
+
 $<HTMLInputElement>('otsCheck').addEventListener('change', (e) => {
   try { localStorage.setItem('shamir-ots', (e.target as HTMLInputElement).checked ? '1' : '0') } catch { /* ignore */ }
 })
@@ -314,9 +382,6 @@ const splitRun = new Run('runLog', 'runProg', [
 ])
 
 $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
-  const err = $('splitError')
-  const warn = $('splitWarn')
-  err.hidden = warn.hidden = true
   const f = splitFile
   const kn = readKn()
   if (!f || !kn) return
@@ -342,54 +407,60 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
         ots = await otsStamp(fileHash)
         run.line(`OTS：回执已收到（${ots.length} 字节），将藏进密文`, 'lg-ok')
       } catch (e) {
-        run.line(`OTS：提交失败（${e instanceof Error ? e.message : e}），已跳过`, 'lg-err')
-        warn.hidden = false
-        warn.textContent = `OTS 存证失败（${e instanceof Error ? e.message : e}），已跳过，不影响分片。可稍后重试。`
+        run.line(`OTS：提交失败（${e instanceof Error ? e.message : e}），已跳过，不影响分片`, 'lg-warn')
       }
     }
 
+    run.line(`压缩（${ALGO_LABEL[currentAlgo()]}）…`)
+    run.prog(50)
+    const packed = await compressData(fileBytes, currentAlgo())
+    run.line(
+      `载荷：${fmtSize(fileBytes.length)} → ${fmtSize(packed.bytes.length)}（${packed.note}）`,
+      packed.algo === ALGO.NONE ? 'lg-warn' : 'lg-ok',
+    )
+
     run.line('生成 key 并 AES-256-GCM 加密…')
-    run.prog(80)
-    const key = randomBytes(KEY_LEN)
+    run.prog(68)
+    const key = randomFieldBytes() // 保证 < p，落在域外就丢弃重取
     const iv = randomBytes(IV_LEN)
 
     // 内层载荷包：原数据 + 元数据 + 存证，整体进密文
     const innerChunks = [
-      { tag: SMPK.TAG.FILENAME, value: new TextEncoder().encode(f.name) },
-      { tag: SMPK.TAG.CREATED_AT, value: u64beBytes(Date.now()) },
-      { tag: SMPK.TAG.SHA256, value: fileHash },
-      ...(f.type ? [{ tag: SMPK.TAG.MIME, value: new TextEncoder().encode(f.type) }] : []),
-      ...(ots ? [{ tag: SMPK.TAG.OTS_RECEIPT, value: ots }] : []),
-      { tag: SMPK.TAG.DATA, value: fileBytes },
+      { tag: TSPK.TAG.FILENAME, value: new TextEncoder().encode(f.name) },
+      { tag: TSPK.TAG.CREATED_AT, value: u64beBytes(Date.now()) },
+      { tag: TSPK.TAG.SHA256, value: fileHash },
+      ...(f.type ? [{ tag: TSPK.TAG.MIME, value: new TextEncoder().encode(f.type) }] : []),
+      { tag: TSPK.TAG.ALGO, value: new Uint8Array([packed.algo]) },
+      ...(ots ? [{ tag: TSPK.TAG.OTS_RECEIPT, value: ots }] : []),
+      { tag: TSPK.TAG.DATA, value: packed.bytes },
     ]
-    const inner = tlvBuild(SMPK.MAGIC, SMPK.VERSION, innerChunks, { lastTag: SMPK.TAG.DATA })
+    const inner = tlvBuild(TSPK.MAGIC, TSPK.VERSION, innerChunks, { lastTag: TSPK.TAG.DATA })
     const ciphertext = await aesEncrypt(key, iv, inner)
 
     const outer = tlvBuild(
-      SMCF.MAGIC,
-      SMCF.VERSION,
+      TSCF.MAGIC,
+      TSCF.VERSION,
       [
-        { tag: SMCF.TAG.K, value: new Uint8Array([k]) },
-        { tag: SMCF.TAG.N, value: new Uint8Array([n]) },
-        { tag: SMCF.TAG.IV, value: iv },
-        { tag: SMCF.TAG.CIPHERTEXT, value: ciphertext },
+        { tag: TSCF.TAG.K, value: u32beBytes(k) },
+        { tag: TSCF.TAG.N, value: u32beBytes(n) },
+        { tag: TSCF.TAG.IV, value: iv },
+        { tag: TSCF.TAG.CIPHERTEXT, value: ciphertext },
       ],
-      { lastTag: SMCF.LAST_TAG },
+      { lastTag: TSCF.LAST_TAG },
     )
 
     run.line(`Shamir 分片（k=${k}/n=${n}）…`)
-    run.prog(92)
-    const shares = await shamirSplit(key, n, k)
-    const shareTexts = shares.map((s) => encodeShare(k, n, s))
+    run.prog(72)
+    const shares = await splitInWorker(key, n, k, stageProgress(run, 72, 99, '分片'))
+    const shareTexts = shares.map((s) => encodeShare(k, s))
 
     splitResult = { stem: productStem(), ciphertext: outer, shareTexts }
     run.line('完成 ✓', 'lg-ok')
     run.end()
     renderSplitResult(f, k, n, ots)
   } catch (e) {
+    run.line(`拆分失败：${e instanceof Error ? e.message : String(e)}`, 'lg-err')
     run.fail()
-    err.hidden = false
-    err.textContent = `拆分失败：${e instanceof Error ? e.message : String(e)}`
   }
 })
 
@@ -397,7 +468,7 @@ function renderProductNames(): void {
   if (!splitResult) return
   const stem = productStem()
   splitResult.stem = stem
-  $('ctName').textContent = `${stem}.tsss`
+  $('ctName').textContent = `${stem}.tscf`
   document.querySelectorAll('.share-row').forEach((row, i) => {
     const span = row.querySelector('.share-name') as HTMLElement | null
     if (span) span.textContent = `${stem}_share${i + 1}.txt`
@@ -408,7 +479,7 @@ function renderSplitResult(f: File, k: number, n: number, ots: Uint8Array | null
   nameCustom.hidden = nameMode() !== 'custom'
   const card = $('resultCard')
   card.hidden = false
-  $('ctName').textContent = `${splitResult!.stem}.tsss`
+  $('ctName').textContent = `${splitResult!.stem}.tscf`
   $('ctMeta').textContent = `${fmtSize(f.size)} → ${fmtSize(splitResult!.ciphertext.length)} · k=${k}/n=${n}`
 
   const box = $('otsBox')
@@ -425,7 +496,12 @@ function renderSplitResult(f: File, k: number, n: number, ots: Uint8Array | null
 
   const list = $('shareList')
   list.innerHTML = ''
-  splitResult!.shareTexts.forEach((text, i) => {
+  const texts = splitResult!.shareTexts
+  // n 可以到十万：逐行渲染会创建十万个 DOM 节点，浏览器直接卡死。
+  // 只渲染前 50 行，其余交给「打包下载」——真要一片片发，文件比列表有用。
+  const shown = Math.min(texts.length, SHARE_ROWS)
+  for (let i = 0; i < shown; i++) {
+    const text = texts[i]!
     const row = document.createElement('div')
     row.className = 'share-row'
     const idx = document.createElement('div')
@@ -450,16 +526,46 @@ function renderSplitResult(f: File, k: number, n: number, ots: Uint8Array | null
     bDl.addEventListener('click', () => download(`${splitResult!.stem}_share${i + 1}.txt`, new TextEncoder().encode(text + '\n')))
     row.append(idx, span, name, bCopy, bDl)
     list.appendChild(row)
-  })
+  }
+  if (shown < texts.length) {
+    const more = document.createElement('div')
+    more.className = 'share-more'
+    more.textContent = `共 ${texts.length.toLocaleString()} 片，已折叠其余 ${(texts.length - shown).toLocaleString()} 片 —— 用下面的一键打包拿全部分片。`
+    list.appendChild(more)
+  }
 
   $<HTMLButtonElement>('btnDlCt').onclick = () =>
-    download(`${splitResult!.stem}.tsss`, splitResult!.ciphertext)
+    download(`${splitResult!.stem}.tscf`, splitResult!.ciphertext)
 
-  $<HTMLButtonElement>('btnDlAll').onclick = async () => {
-    download(`${splitResult!.stem}.tsss`, splitResult!.ciphertext)
-    for (let i = 0; i < splitResult!.shareTexts.length; i++) {
-      await new Promise((r) => setTimeout(r, 250))
-      download(`${splitResult!.stem}_share${i + 1}.txt`, new TextEncoder().encode(splitResult!.shareTexts[i]! + '\n'))
+  const btnAll = $<HTMLButtonElement>('btnDlAll')
+  const canLoop = texts.length <= 20
+  btnAll.textContent = canLoop ? '下载全部（密文 + 分片）' : `打包下载全部（zip · ${texts.length.toLocaleString()} 片）`
+  btnAll.onclick = async () => {
+    const stem = splitResult!.stem
+    // 片数少就逐个下载，省得用户还要解压；片数多只能打包，
+    // 因为浏览器会拦截连续几十上百次自动下载。
+    if (canLoop) {
+      download(`${stem}.tscf`, splitResult!.ciphertext)
+      for (let i = 0; i < texts.length; i++) {
+        await new Promise((r) => setTimeout(r, 250))
+        download(`${stem}_share${i + 1}.txt`, new TextEncoder().encode(texts[i]! + '\n'))
+      }
+      return
+    }
+    const label = btnAll.textContent
+    btnAll.disabled = true
+    btnAll.textContent = '打包中…'
+    await new Promise((r) => setTimeout(r, 30)) // 先让按钮状态渲染出来
+    try {
+      const enc = new TextEncoder()
+      const entries = [
+        { name: `${stem}/${stem}.tscf`, data: splitResult!.ciphertext },
+        ...texts.map((t, i) => ({ name: `${stem}/share${i + 1}.txt`, data: enc.encode(t + '\n') })),
+      ]
+      download(`${stem}.zip`, buildZip(entries))
+    } finally {
+      btnAll.disabled = false
+      btnAll.textContent = label
     }
   }
 
@@ -473,7 +579,7 @@ interface CtEntry {
   size: number
   bytes: Uint8Array
   k: number
-  n: number
+  n?: number // 外层 0x03 N 可省略：缺失时只用分片自带的 n 做一致性校验
 }
 
 let ctEntries: CtEntry[] = []
@@ -481,11 +587,12 @@ let activeCt: CtEntry | null = null
 const shareMap = new Map<number, ShareEntry>()
 let restoreOk: { name: string; data: Uint8Array } | null = null
 
-const SHARE_RE = /SHAMIR\d?:/
+const SHARE_RE = /TSK\d+:/
 
 /** 追加分片文本（多行），返回新增数与错误消息；同 index 内容冲突保留原片 */
 function importShareText(text: string): { added: number; errors: string[] } {
   let added = 0
+  let recognized = 0
   const errors: string[] = []
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim()
@@ -493,8 +600,9 @@ function importShareText(text: string): { added: number; errors: string[] } {
     try {
       const entry = parseShareLine(line)
       if (!entry) continue
+      recognized++
       const prev = shareMap.get(entry.index)
-      if (prev && (prev.k !== entry.k || prev.n !== entry.n || !bytesEq(prev.payload, entry.payload))) {
+      if (prev && (prev.k !== entry.k || !bytesEq(prev.payload, entry.payload))) {
         errors.push(`第 ${entry.index} 号分片内容冲突，已保留原片`)
       } else if (!prev) {
         shareMap.set(entry.index, entry)
@@ -504,24 +612,29 @@ function importShareText(text: string): { added: number; errors: string[] } {
       errors.push(err instanceof Error ? err.message : String(err))
     }
   }
+  if (recognized === 0) errors.push('没有识别到分片（格式应为 TSK1:k:base64…，一条一行）')
   return { added, errors }
 }
 
-/** 摄取文件：.tsss/.smcf 或 SMCF 头 → 密文；含分片文本 → 逐片导入；其余报错 */
+/** 摄取文件：TSCF 头 → 密文；含 TSK1 分片文本 → 逐片导入；其余报错（结果全进按钮下方日志） */
 async function ingestFiles(files: File[]): Promise<void> {
-  const info = $('ctInfo')
-  info.hidden = false
-  const messages: HTMLElement[] = []
+  // 一次拖进上万个文件是真实场景（k 很大时要凑很多片）：
+  // 逐个文件写日志 + 逐个重渲染列表会把界面拖死，所以只在文件少时逐条记。
+  const verbose = files.length <= 20
+  let shareFiles = 0
+  let shareCount = 0
   for (const f of files) {
     try {
       const buf = new Uint8Array(await f.arrayBuffer())
       let handled = false
       try {
-        const outer = tlvParse(SMCF.MAGIC, buf)
-        if (outer.version !== SMCF.VERSION) throw new Error(`不支持的密文版本 v${outer.version}`)
-        const k = outer.chunks.get(SMCF.TAG.K)?.[0]
-        const n = outer.chunks.get(SMCF.TAG.N)?.[0]
-        if (!k || !n) throw new Error('密文缺少 k/n 参数')
+        const outer = tlvParse(TSCF.MAGIC, buf)
+        if (outer.version !== TSCF.VERSION) throw new Error(`不支持的密文版本 v${outer.version}`)
+        const kBytes = outer.chunks.get(TSCF.TAG.K)
+        const nBytes = outer.chunks.get(TSCF.TAG.N)
+        const k = kBytes ? beBytesToUint(kBytes) : 0
+        const n = nBytes ? beBytesToUint(nBytes) : undefined
+        if (!k) throw new Error('密文缺少 k 参数')
         const entry: CtEntry = { name: f.name, size: f.size, bytes: buf, k, n }
         ctEntries.push(entry)
         activeCt = entry
@@ -530,24 +643,27 @@ async function ingestFiles(files: File[]): Promise<void> {
         // 不是密文 → 尝试按分片文本处理；带密文扩展名却解析失败则直接报错
         const text = new TextDecoder('utf-8', { fatal: false }).decode(buf)
         if (!SHARE_RE.test(text)) {
-          if (/\.(tsss|smcf)$/i.test(f.name)) throw ctErr
+          if (/\.tscf$/i.test(f.name)) throw ctErr
           throw new Error(`无法识别的文件（既不是密文也不含分片）`)
         }
         const { added, errors } = importShareText(text)
-        messages.push(
-          el('span', 'ots-status ' + (errors.length ? 'pending' : 'ok'),
-            `${f.name}：导入 ${added} 片${errors.length ? `；${errors.join('；')}` : ''}`),
-        )
-        renderShareList()
+        shareFiles++
+        shareCount += added
+        if (verbose || errors.length)
+          logLine(
+            'restoreLog',
+            `${f.name}：导入 ${added} 片${errors.length ? `；${errors.join('；')}` : ''}`,
+            errors.length ? 'lg-warn' : 'lg-ok',
+          )
       }
-      if (handled) messages.push(el('span', 'ots-status ok', `🔐 ${f.name}（${fmtSize(f.size)}）已加入密文列表`))
+      if (handled && verbose) logLine('restoreLog', `🔐 ${f.name}（${fmtSize(f.size)}）已加入密文列表`, 'lg-ok')
     } catch (e) {
-      messages.push(el('span', 'ots-status pending', `⚠️ ${f.name}：${e instanceof Error ? e.message : String(e)}`))
+      logLine('restoreLog', `⚠️ ${f.name}：${e instanceof Error ? e.message : String(e)}`, 'lg-err')
     }
   }
-  info.textContent = ''
-  if (messages.length) info.append(...messages)
-  else info.hidden = true
+  if (!verbose && shareFiles > 0)
+    logLine('restoreLog', `已从 ${shareFiles.toLocaleString()} 个文件导入 ${shareCount.toLocaleString()} 片，当前共 ${shareMap.size.toLocaleString()} 片`, 'lg-ok')
+  renderShareList()
   renderCtList()
   refreshRestoreBtn()
 }
@@ -569,7 +685,7 @@ function renderCtList(): void {
     })
     row.append(
       el('span', 'mini-name', `🔐 ${c.name}`),
-      el('span', 'mini-meta', `${fmtSize(c.size)} · k=${c.k}/n=${c.n}`),
+      el('span', 'mini-meta', `${fmtSize(c.size)} · k=${c.k}/n=${c.n ?? '?'}`),
       del,
     )
     row.addEventListener('click', () => {
@@ -586,9 +702,10 @@ function renderShareList(): void {
   list.textContent = ''
   const shares = [...shareMap.values()].sort((a, b) => a.index - b.index)
   list.hidden = shares.length === 0
-  for (const s of shares) {
+  // 同上：几万片时逐行渲染会卡死，只画前 50 行，剩下用计数交代
+  for (const s of shares.slice(0, SHARE_ROWS)) {
     const row = el('div', 'mini-row')
-    const text = encodeShare(s.k, s.n, s.payload)
+    const text = encodeShare(s.k, s.payload)
     const del = el('button', 'btn share-btn', '移除')
     del.type = 'button'
     del.addEventListener('click', () => {
@@ -603,6 +720,11 @@ function renderShareList(): void {
     )
     list.append(row)
   }
+  if (shares.length > SHARE_ROWS) {
+    list.append(
+      el('div', 'share-more', `共 ${shares.length.toLocaleString()} 片，这里只按坐标显示前 ${SHARE_ROWS} 片`),
+    )
+  }
 }
 
 function refreshRestoreBtn(): void {
@@ -616,13 +738,14 @@ function refreshRestoreBtn(): void {
   }
   const { k, n } = activeCt
   const shares = [...shareMap.values()]
-  const bad = shares.find((s) => s.k !== k || s.n !== n)
+  const bad = shares.find((s) => s.k !== k)
   if (bad) {
-    status.textContent = `⚠️ 有分片 k/n (${bad.k}/${bad.n}) 与密文 (${k}/${n}) 不一致`
+    status.textContent = `⚠️ 有分片的 k=${bad.k} 与密文 k=${k} 不一致`
     btn.disabled = true
     return
   }
-  status.textContent = `已导入 ${shares.length} 片（k=${k}，n=${n}${shares.length >= k ? '，够用 ✓' : `，还差 ${k - shares.length} 片`}）`
+  const nText = n != null ? `，n=${n}` : '，n 未记录'
+  status.textContent = `已导入 ${shares.length} 片（k=${k}${nText}${shares.length >= k ? '，够用 ✓' : `，还差 ${k - shares.length} 片`}）`
   btn.disabled = shares.length < k
 }
 
@@ -630,8 +753,21 @@ const fileCtInput = bindDrop('dropCt', true, (files) => void ingestFiles(files))
 
 function addShareFromInput(): void {
   const input = $<HTMLInputElement>('shareInput')
-  if (!input.value.trim()) return
-  importShareText(input.value)
+  const text = input.value.trim()
+  if (!text) return
+  const { added, errors } = importShareText(text)
+  if (added > 0) {
+    logLine(
+      'restoreLog',
+      `已添加 ${added} 片${errors.length ? `；${errors.join('；')}` : ''}`,
+      errors.length ? 'lg-warn' : 'lg-ok',
+    )
+  } else {
+    const reason = errors.length
+      ? errors.join('；')
+      : '没有新增（内容为空，或该分片已存在）'
+    logLine('restoreLog', `未能添加：${reason}`, 'lg-err')
+  }
   input.value = ''
   input.focus() // 回车/添加后焦点回到输入框，继续贴下一条
   renderShareList()
@@ -676,40 +812,50 @@ const restoreRun = new Run('restoreLog', 'restoreProg', [
 ])
 
 $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
-  const err = $('restoreError')
-  err.hidden = true
   const run = restoreRun
   run.begin()
   try {
     run.line('解析分片…')
     run.prog(10)
     const shares = [...shareMap.values()].sort((a, b) => a.index - b.index)
-    checkConsistency(shares, activeCt!.k, activeCt!.n)
+    checkConsistency(shares, activeCt!.k)
 
     run.line('重放 Shamir 合并密钥…')
-    run.prog(35)
-    const key = await shamirCombine(shares.slice(0, shares[0]!.k).map((s) => s.payload))
+    run.prog(15)
+    const key = await combineInWorker(
+      shares.slice(0, shares[0]!.k).map((s) => s.payload),
+      stageProgress(run, 15, 70, '插值'),
+    )
 
     run.line(`AES-256-GCM 解密（${fmtSize(activeCt!.bytes.length)}）…`)
-    run.prog(60)
-    const outer = tlvParse(SMCF.MAGIC, activeCt!.bytes)
-    const iv = outer.chunks.get(SMCF.TAG.IV)
-    const ct = outer.chunks.get(SMCF.TAG.CIPHERTEXT)
+    run.prog(78)
+    const outer = tlvParse(TSCF.MAGIC, activeCt!.bytes)
+    const iv = outer.chunks.get(TSCF.TAG.IV)
+    const ct = outer.chunks.get(TSCF.TAG.CIPHERTEXT)
     if (!iv || iv.length !== IV_LEN) throw new Error('密文缺少 IV 或长度不对')
     if (!ct) throw new Error('密文缺少 CIPHERTEXT 块')
     const inner = await aesDecrypt(key, iv, ct)
 
     run.line('解析载荷包…')
-    run.prog(85)
-    const pack = tlvParse(SMPK.MAGIC, inner)
-    if (pack.version !== SMPK.VERSION) throw new Error(`不支持的载荷包版本 v${pack.version}`)
-    const data = pack.chunks.get(SMPK.TAG.DATA)
-    if (!data) throw new Error('载荷包缺少 DATA 块')
-    const nameBytes = pack.chunks.get(SMPK.TAG.FILENAME)
-    const name = nameBytes ? new TextDecoder().decode(nameBytes) : 'restored.bin'
+    run.prog(86)
+    const pack = tlvParse(TSPK.MAGIC, inner)
+    if (pack.version !== TSPK.VERSION) throw new Error(`不支持的载荷包版本 v${pack.version}`)
+    const stored = pack.chunks.get(TSPK.TAG.DATA)
+    if (!stored) throw new Error('载荷包缺少 DATA 块')
+    const algo = pack.chunks.get(TSPK.TAG.ALGO)?.[0] ?? ALGO.NONE
+    let data = stored
+    if (algo !== ALGO.NONE) {
+      run.line(`解压（${ALGO_LABEL[algo] ?? `算法 ${algo}`}，${fmtSize(stored.length)}）…`)
+      run.prog(90)
+      data = await decompressData(stored, algo)
+    }
+    const nameBytes = pack.chunks.get(TSPK.TAG.FILENAME)
+    const createdAtBytes = pack.chunks.get(TSPK.TAG.CREATED_AT)
+    const createdAt = createdAtBytes ? beBytesToU64(createdAtBytes) : null
+    const name = nameBytes ? new TextDecoder().decode(nameBytes) : defaultName(createdAt)
 
     // SHA-256 完整性
-    const expect = pack.chunks.get(SMPK.TAG.SHA256)
+    const expect = pack.chunks.get(TSPK.TAG.SHA256)
     const actual = await sha256(data)
     const hashOk = expect ? toHex(expect) === toHex(actual) : null
 
@@ -718,11 +864,17 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
     run.end()
     await renderRestore(pack, data, name, hashOk, actual)
   } catch (e) {
+    run.line(`恢复失败：${e instanceof Error ? e.message : String(e)}`, 'lg-err')
     run.fail()
-    err.hidden = false
-    err.textContent = `恢复失败：${e instanceof Error ? e.message : String(e)}`
   }
 })
+
+/** 内层没写 FILENAME 时的默认下载名：YYYY-MM-DD.bin（拆分时间优先，否则用当前时间） */
+function defaultName(createdAt: number | null): string {
+  const d = new Date(createdAt ?? Date.now())
+  const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  return `${ymd}.bin`
+}
 
 async function renderRestore(
   pack: { chunks: Map<number, Uint8Array> },
@@ -734,14 +886,15 @@ async function renderRestore(
   const card = $('restoreCard')
   card.hidden = false
   $('restName').textContent = name
-  const createdAtBytes = pack.chunks.get(SMPK.TAG.CREATED_AT)
+  const createdAtBytes = pack.chunks.get(TSPK.TAG.CREATED_AT)
   const createdAt = createdAtBytes ? beBytesToU64(createdAtBytes) : null
-  $('restMeta').textContent = `${fmtSize(data.length)}${createdAt ? ` · ${new Date(createdAt).toLocaleString()}` : ''}`
+  // CREATED_AT / MIME 均为可选：缺失时只留白，不报错
+  $('restMeta').textContent = `${fmtSize(data.length)}${createdAt ? ` · ${new Date(createdAt).toLocaleString()}` : ' · 时间未记录'}`
   $('hashLine').textContent = `SHA-256：${toHex(actualHash)}${hashOk === false ? '\n⚠️ 与打包时记录的哈希不一致，文件可能被篡改！' : ''}`
 
   // OTS：回执在内层，解密后才可见；初始消息 = 原文件哈希，重放 ops 得到被锚定摘要。
   // 检测到回执就自动后台查询（不阻塞文件下载）：pending → 查日历升级；已锚定 → 直接链上验证。
-  const otsBytes = pack.chunks.get(SMPK.TAG.OTS_RECEIPT)
+  const otsBytes = pack.chunks.get(TSPK.TAG.OTS_RECEIPT)
   const box = $('otsRestBox')
   if (otsBytes) {
     box.hidden = false
@@ -809,7 +962,7 @@ async function renderRestore(
           status.textContent = ''
           status.append(
             el('span', 'ots-status pending', `OTS 待锚定（后台查询失败：${e instanceof Error ? e.message : String(e)}）`),
-            el('span', '', '查询不影响文件本身；网络可用时可重新恢复本密文再查。'),
+            el('span', '', '公开日历通常未开放跨域读取，浏览器端多半只能拿到"待锚定"状态；可点「下载 ots 文件」交给官方工具（ots verify）复核。'),
           )
         }
       })()
@@ -826,5 +979,15 @@ async function renderRestore(
   }
 
   $<HTMLButtonElement>('btnDlRest').onclick = () => restoreOk && download(restoreOk.name, restoreOk.data)
+  // 有 OTS 回执时，额外提供「下载 ots 文件」：包装成标准 DetachedTimestampFile，
+  // 官方 ots 工具与 opentimestamps.org 网页可直接验证
+  const otsBtn = $<HTMLButtonElement>('btnDlOts')
+  if (otsBytes) {
+    otsBtn.hidden = false
+    otsBtn.onclick = () => download(`${name}.ots`, toDetachedOts(otsBytes, actualHash))
+  } else {
+    otsBtn.hidden = true
+    otsBtn.onclick = null
+  }
   card.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
 }
