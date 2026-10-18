@@ -202,6 +202,18 @@ export async function otsStamp(fileDigest: Uint8Array, timeoutMs = 20000): Promi
   }
 }
 
+/** 日历域名白名单：回执内的 URI 完全由文件内容控制，联网查询前必须校验，防内网探测/外发 */
+export function isAllowedCalendarUri(uri: string): boolean {
+  try {
+    const u = new URL(uri)
+    if (u.protocol !== 'https:') return false
+    const host = u.hostname.toLowerCase()
+    return host === 'opentimestamps.org' || host.endsWith('.opentimestamps.org')
+  } catch {
+    return false
+  }
+}
+
 /**
  * 向日历查询回执升级（OTS "upgrade" 的轻量版）：
  * GET {uri}/timestamp/<待锚定摘要hex> → 若日历已把该承诺锚上比特币，
@@ -212,6 +224,7 @@ export async function upgradePending(
   timeoutMs = 20000,
 ): Promise<OtsParse> {
   if (!p.digest) throw new Error('回执结构降级，无法确定查询摘要')
+  if (!isAllowedCalendarUri(p.uri)) throw new Error(`回执内日历地址不受信任，已拒绝查询：${p.uri}`)
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), timeoutMs)
   try {

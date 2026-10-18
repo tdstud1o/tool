@@ -10,6 +10,14 @@ import { toHex } from './core/b64.ts'
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T
 
+/** 安全构建元素：外部数据（文件名、回执 URI、API 响应、错误消息）一律走 textContent */
+function el(tag: string, cls: string, ...children: (Node | string)[]): HTMLElement {
+  const e = document.createElement(tag)
+  if (cls) e.className = cls
+  for (const c of children) e.append(c)
+  return e
+}
+
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`
@@ -454,7 +462,8 @@ function showCtFile(f: File): void {
   $('dropCtText').textContent = `🔐 ${f.name} · ${fmtSize(f.size)}`
   const info = $('ctInfo')
   info.hidden = false
-  info.innerHTML = '<span class="ots-status pending">解析密文头…</span>'
+  info.textContent = ''
+  info.append(el('span', 'ots-status pending', '解析密文头…'))
   f.arrayBuffer()
     .then(async (buf) => {
       ctBytes = new Uint8Array(buf)
@@ -465,12 +474,20 @@ function showCtFile(f: File): void {
       if (!k || !n) throw new Error('密文缺少 k/n 参数')
       const nm = outer.chunks.get(SMCF.TAG.FILENAME)
       ctHeader = { k, n, name: nm ? new TextDecoder().decode(nm) : f.name, size: f.size }
-      info.innerHTML = `<b>${ctHeader.name}</b> · ${fmtSize(ctHeader.size)} · 需要 <b>k=${k}</b> 片分片（共 n=${n}），在下面贴入或导入`
+      // 密文文件名完全由文件内容控制，必须走 textContent，禁止 innerHTML 拼接
+      info.textContent = ''
+      info.append(
+        el('b', '', ctHeader.name),
+        ` · ${fmtSize(ctHeader.size)} · 需要 `,
+        el('b', '', `k=${ctHeader.k}`),
+        ` 片分片（共 n=${ctHeader.n}），在下面贴入或导入`,
+      )
       refreshRestoreBtn()
     })
     .catch((e) => {
       ctBytes = ctHeader = null
-      info.innerHTML = `<span class="ots-status pending">⚠️ ${e instanceof Error ? e.message : e}</span>`
+      info.textContent = ''
+      info.append(el('span', 'ots-status pending', `⚠️ ${e instanceof Error ? e.message : String(e)}`))
       refreshRestoreBtn()
     })
 }
@@ -621,32 +638,37 @@ async function renderRestore(
   const box = $('otsRestBox')
   if (otsBytes) {
     box.hidden = false
-    box.innerHTML = ''
+    box.textContent = ''
     try {
       const ots = await parseOts(otsBytes, actualHash)
       const pending = ots.attestations.filter((a) => a.kind === 'pending') as { kind: 'pending'; uri: string; digest: Uint8Array | null }[]
       const anchors = ots.attestations.filter((a) => a.kind === 'bitcoin') as { kind: 'bitcoin'; height: number; digest: Uint8Array | null }[]
 
-      const status = document.createElement('div')
-      status.className = 'ots-line'
-      const spinning = '<span class="spinner" aria-hidden="true"></span>'
-      if (anchors.length > 0) {
-        status.innerHTML =
-          `<span class="ots-status ok">OTS 已锚定 Bitcoin 区块 #${anchors.map((a) => a.height).join(' / #')}</span>` +
-          `${spinning}<span>正在比对区块链…</span>`
-      } else if (pending.length > 0) {
-        status.innerHTML =
-          `<span class="ots-status pending">OTS 待锚定</span>` +
-          `${spinning}<span>拆分时已提交日历，正在后台查询最新状态…</span>`
-      } else {
-        status.innerHTML = `<span class="ots-status pending">OTS 回执存在，但未识别出 attestation</span>`
+      const spinner = () => {
+        const s = el('span', 'spinner')
+        s.setAttribute('aria-hidden', 'true')
+        return s
       }
-      box.appendChild(status)
+      const status = el('div', 'ots-line')
+      if (anchors.length > 0) {
+        status.append(
+          el('span', 'ots-status ok', `OTS 已锚定 Bitcoin 区块 #${anchors.map((a) => a.height).join(' / #')}`),
+          spinner(),
+          el('span', '', '正在比对区块链…'),
+        )
+      } else if (pending.length > 0) {
+        status.append(
+          el('span', 'ots-status pending', 'OTS 待锚定'),
+          spinner(),
+          el('span', '', '拆分时已提交日历，正在后台查询最新状态…'),
+        )
+      } else {
+        status.append(el('span', 'ots-status pending', 'OTS 回执存在，但未识别出 attestation'))
+      }
+      box.append(status)
 
       // 后台查询：完成后原地更新状态行（成功/失败都不打扰用户下载文件）
       void (async () => {
-        const line = document.createElement('div')
-        line.className = 'ots-line'
         try {
           let toVerify: { height: number; digest: Uint8Array | null }[] = anchors
           if (anchors.length === 0) {
@@ -656,9 +678,11 @@ async function renderRestore(
               u.attestations.filter((a) => a.kind === 'bitcoin'),
             ) as { kind: 'bitcoin'; height: number; digest: Uint8Array | null }[]
             if (toVerify.length === 0) {
-              status.innerHTML =
-                `<span class="ots-status pending">OTS 待锚定</span>` +
-                `<span>已查日历（${pending.map((p) => p.uri).join('、')}）：尚未上链，比特币锚定通常需 1~3 小时，之后重新恢复本密文可自动再查。</span>`
+              status.textContent = ''
+              status.append(
+                el('span', 'ots-status pending', 'OTS 待锚定'),
+                el('span', '', `已查日历（${pending.map((p) => p.uri).join('、')}）：尚未上链，比特币锚定通常需 1~3 小时，之后重新恢复本密文可自动再查。`),
+              )
               return
             }
           }
@@ -666,24 +690,29 @@ async function renderRestore(
             toVerify.map((a) => verifyAnchorOnline({ height: a.height, digest: a.digest })),
           )
           const ok = results.some((r) => r.ok)
-          status.innerHTML =
-            `<span class="ots-status ${ok ? 'ok' : 'pending'}">${ok ? '✓ OTS 存证有效（区块链验证通过）' : '⚠️ OTS 上链但验证未通过，请警惕文件来源'}</span>` +
-            results.map((r) => `<span>#${r.height} @ ${new Date(r.blockTime).toLocaleString()}：${r.detail}</span>`).join('')
+          status.textContent = ''
+          status.append(
+            el('span', `ots-status ${ok ? 'ok' : 'pending'}`,
+              ok ? '✓ OTS 存证有效（区块链验证通过）' : '⚠️ OTS 上链但验证未通过，请警惕文件来源'),
+            ...results.map((r) =>
+              el('span', '', `#${r.height} @ ${new Date(r.blockTime).toLocaleString()}：${r.detail}`),
+            ),
+          )
         } catch (e) {
-          status.innerHTML =
-            `<span class="ots-status pending">OTS 待锚定（后台查询失败：${e instanceof Error ? e.message : e}）</span>` +
-            `<span>查询不影响文件本身；网络可用时可重新恢复本密文再查。</span>`
+          status.textContent = ''
+          status.append(
+            el('span', 'ots-status pending', `OTS 待锚定（后台查询失败：${e instanceof Error ? e.message : String(e)}）`),
+            el('span', '', '查询不影响文件本身；网络可用时可重新恢复本密文再查。'),
+          )
         }
       })()
 
       if (ots.degraded) {
-        const note = document.createElement('div')
-        note.className = 'ots-line'
-        note.innerHTML = `<span class="ots-status pending">回执含未识别结构，以上仅部分解析；建议用官方验证器复核。</span>`
-        box.appendChild(note)
+        box.append(el('div', 'ots-line', el('span', 'ots-status pending', '回执含未识别结构，以上仅部分解析；建议用官方验证器复核。')))
       }
     } catch (e) {
-      box.innerHTML = `<div class="ots-line"><span class="ots-status pending">OTS 回执解析失败：${e instanceof Error ? e.message : e}</span></div>`
+      box.textContent = ''
+      box.append(el('div', 'ots-line', el('span', 'ots-status pending', `OTS 回执解析失败：${e instanceof Error ? e.message : String(e)}`)))
     }
   } else {
     box.hidden = true

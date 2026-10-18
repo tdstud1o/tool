@@ -3,7 +3,7 @@ import { randomBytes, aesEncrypt, aesDecrypt, sha256 } from '../src/core/crypto.
 import { SMPK, SMCF, tlvBuild, tlvParse, u64beBytes } from '../src/core/tlv.ts'
 import { shamirSplit, shamirCombine } from '../src/core/shamir.ts'
 import { encodeShare, parseShares, checkConsistency } from '../src/core/format.ts'
-import { parseOts } from '../src/core/ots.ts'
+import { parseOts, isAllowedCalendarUri } from '../src/core/ots.ts'
 import { bytesEq, cat, toHex } from '../src/core/b64.ts'
 
 const PENDING_TAG = Uint8Array.from([0x83, 0xdf, 0xe3, 0x0d, 0x2e, 0xf9, 0x0c, 0x8e])
@@ -154,6 +154,10 @@ check('OTS bitcoin 重放摘要', a0?.digest !== null && a0?.digest !== undefine
 
 const otsWrapped = await parseOts(magicWrappedOts(fileHash), undefined)
 check('OTS 兼容 DetachedTimestampFile 头', otsWrapped.attestations[0]?.kind === 'pending' && toHex(otsWrapped.attestations[0]!.digest!) === toHex(fileHash))
+
+// 3b) 日历 URI 白名单（防恶意回执发起任意请求）
+check('OTS 白名单放行官方日历', isAllowedCalendarUri('https://alice.btc.calendar.opentimestamps.org') && isAllowedCalendarUri('https://a.pool.opentimestamps.org/digest'))
+check('OTS 白名单拒绝内网/外域/非 https', !isAllowedCalendarUri('http://a.pool.opentimestamps.org/digest') && !isAllowedCalendarUri('https://192.168.1.1/timestamp') && !isAllowedCalendarUri('https://evil.example.com/timestamp') && !isAllowedCalendarUri('not a url'))
 
 // 4) 分片文本异常分支
 check('少于 k 片报错', (() => {
