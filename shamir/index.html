@@ -69,6 +69,12 @@
             <div class="adv-body">
               <div class="adv-item">
                 <label class="align-opt">
+                  <input id="hideNCheck" type="checkbox" />
+                  <span><b>隐藏总共分发的密钥数量</b>：不把 n 写进密文的明文部分，恢复端只会说「还差 x 片」，看不出一共拆了几片（2 层起强制启用）。</span>
+                </label>
+              </div>
+              <div class="adv-item">
+                <label class="align-opt">
                   <input id="alignCheck" type="checkbox" />
                   <span><b>密钥串对齐</b>：每一片都写满固定组数的密钥材料，多出来的组没有密文，让人看不出里面有几层（2 层起强制启用）。</span>
                 </label>
@@ -148,7 +154,7 @@
           <h2>② 导入分片</h2>
           <div id="shareMiniList" class="mini-list" hidden></div>
           <div class="share-add-row">
-            <input id="shareInput" type="text" spellcheck="false" placeholder="输入或粘贴一条分片：TSK1:x:k:y…，回车添加" />
+            <input id="shareInput" type="text" spellcheck="false" placeholder="输入或粘贴一条分片：TSK1:x:k:y,y,…，回车添加" />
             <button id="btnAddShare" class="btn btn-ghost" type="button">添加</button>
           </div>
           <div class="import-row">

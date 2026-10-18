@@ -9,6 +9,8 @@ export interface SplitRequest {
   n: number
   /** 每个槽位的阈值，长度必须与 secrets 一致（诱饵位的值只作标签） */
   ks: number[]
+  /** 强制宽坐标（隐藏 n 时单层也要随机 1..MAX，防止 x 位数暴露 n） */
+  wideCoords?: boolean
 }
 
 /** 恢复：用 k 片还原一层密钥 */

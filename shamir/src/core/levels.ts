@@ -70,12 +70,12 @@ export function nextK(ks: number[]): number {
 }
 
 /**
- * 假文件层的默认 k：接在真实层规律后面的那一个，默认不超过 n
- * （凑够就能"试"，试完发现解密失败）。
- * 用户可以把它改到 n 以上——假层是唯一允许 k > n 的层，那样连凑都凑不齐。
+ * 假文件层的默认 k：接在真实层规律后面的那一个，必定大于最后一层真层的 k。
+ * n 不再封顶：n 会被真层拉高，假层顺着链排即可；若算出来超过 n，
+ * 拆分端会显示「> n」角标（永远凑不齐）。
  */
-export function fakeK(reals: number[], n: number): number {
-  return Math.min(nextK(reals), Math.max(2, n))
+export function fakeK(reals: number[], _n?: number): number {
+  return nextK(reals)
 }
 
 /**

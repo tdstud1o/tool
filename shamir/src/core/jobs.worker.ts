@@ -15,8 +15,12 @@ ctx.onmessage = async (e: MessageEvent<JobRequest>) => {
   const msg = e.data
   try {
     if (msg.type === 'split') {
-      const { buffer, shareLen, m, xs, wide } = await shamirSplitMulti(msg.secrets, msg.n, msg.ks, (done, total) =>
-        progress(msg.id, 'split', done, total),
+      const { buffer, shareLen, m, xs, wide } = await shamirSplitMulti(
+        msg.secrets,
+        msg.n,
+        msg.ks,
+        (done, total) => progress(msg.id, 'split', done, total),
+        msg.wideCoords === true,
       )
       // 整个结果一次 transfer，避免十万次 postMessage
       const ab = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer

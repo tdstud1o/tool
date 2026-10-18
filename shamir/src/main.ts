@@ -215,6 +215,8 @@ function stageProgress(run: Run, from: number, to: number, label: string): (done
  */
 interface LevelRow extends LevelPlan {
   file?: File
+  /** 分片文本里这组要不要写 k（默认不写；恢复端从密文 0x02 K 读） */
+  showK: boolean
 }
 
 let levels: LevelRow[] = []
@@ -226,6 +228,8 @@ let fakeAlign: '32' | '256' | 'custom' = '32'
 let fakeCustom = 32
 /** 密钥串对齐开关：勾上后每片补齐固定组数（多出来的组没有密文） */
 let alignEnabled = false
+/** 隐藏总片数开关：勾上后密文明文部分不写 0x03 N（n 是否进明文结构，权威看这里） */
+let hideN = false
 /** 假层的 k 被用户手改过之后，就不再跟随真实层的规律 */
 let fakeKDirty = false
 
@@ -238,7 +242,8 @@ const realLevels = (): LevelRow[] => levels.filter((l) => l.kind === 'real')
 const fakeLevel = (): LevelRow | undefined => levels.find((l) => l.kind === 'fake')
 
 function clampK(v: number, cap: number): number {
-  return Math.min(cap, Math.max(2, Math.round(v) || 2))
+  // k 允许 1（单人即可解开，实际没用，但能直观演示工具原理）；上限由调用方给
+  return Math.min(cap, Math.max(1, Math.round(v) || 1))
 }
 
 function setNShares(v: number): void {
@@ -309,8 +314,10 @@ function addRealFiles(files: File[]): void {
     // 后续层默认比上一层多一片门槛：既符合"越深越难"的直觉，
     // 也让假文件能顺着这个等差规律往下接
     const prev = levels.length ? levels[levels.length - 1]!.k : Math.min(3, nShares)
-    const k = clampK(levels.length ? prev + 1 : prev, nShares)
-    levels.push({ kind: 'real', name: f.name, size: f.size, k, file: f })
+    // 新层默认 k 顺着链 +1；超过 n 不压平，而是把 n 拉到一样大
+    const k = levels.length ? prev + 1 : prev
+    if (k > nShares) setNShares(k)
+    levels.push({ kind: 'real', name: f.name, size: f.size, k, showK: false, file: f })
   }
   // 有了文件，大拖放框就让位给下面的分半按钮（左半继续拖/选，右半加假层）
   $('dropSplit').hidden = true
@@ -323,12 +330,16 @@ $<HTMLInputElement>('alignCheck').addEventListener('change', (e) => {
   alignEnabled = (e.target as HTMLInputElement).checked
   syncAlignUi()
 })
+$<HTMLInputElement>('hideNCheck').addEventListener('change', (e) => {
+  hideN = (e.target as HTMLInputElement).checked
+  syncAlignUi()
+})
 syncAlignUi()
 
 /**
  * 真层链严格递增（k₁ < k₂ < … ，至少相差 1；假层不参与）。
  * 从被编辑的层向两边传播：向后只抬不降（后面 ≥ 本层+1），
- * 向前只降不升（前面 ≤ 本层−1，最低压到 2）。
+ * 向前只降不升（前面 ≤ 本层−1，最低压到 1——k 允许 1）。
  */
 function normalizeChain(edited: LevelRow): void {
   const m = realLevels().length
@@ -346,11 +357,38 @@ function normalizeChain(edited: LevelRow): void {
     const cur = levels[j]!
     const max = levels[j + 1]!.k - 1
     if (cur.k > max) {
-      cur.k = Math.max(2, max)
+      cur.k = Math.max(1, max)
       const inp = kInputs.get(cur)
       if (inp) inp.value = String(cur.k)
     }
   }
+  // 向前压到 1 后可能和后一层撞平（如 [2,3] 第 2 层改 1 → [1,1]）：
+  // 再从左到右补一轮「只抬不降」，恢复严格递增
+  for (let j = 1; j < m; j++) {
+    const cur = levels[j]!
+    const min = levels[j - 1]!.k + 1
+    if (cur.k < min) {
+      cur.k = min
+      const inp = kInputs.get(cur)
+      if (inp) inp.value = String(cur.k)
+    }
+  }
+}
+
+/** 假文件层的 k 必定大于最后一层真层的 k；不够就顶到 末层+1 */
+function enforceFakeK(): void {
+  const f = fakeLevel()
+  if (!f) return
+  const reals = realLevels()
+  const last = reals[reals.length - 1]
+  if (!last) return
+  if (f.k <= last.k) {
+    f.k = last.k + 1
+    const inp = kInputs.get(f)
+    if (inp) inp.value = String(f.k)
+  }
+  const badge = kOver.get(f)
+  if (badge) badge.hidden = f.k <= nShares
 }
 
 /** 一层的一行：真文件 = 大小 + k；假文件 = 大小（可改）+ k（可超过 n） */
@@ -381,7 +419,7 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
   const kIn = document.createElement('input')
   kIn.type = 'number'
   kIn.className = 'lv-k-in'
-  kIn.min = '2'
+  kIn.min = '1'
   kIn.max = String(MAX_SHARES)
   kIn.value = String(lv.k)
   kIn.title = isFake
@@ -404,7 +442,16 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
   kIn.addEventListener('input', () => {
     const v = Number(kIn.value)
     if (Number.isFinite(v)) lv.k = clampK(v, MAX_SHARES)
-    if (isFake) fakeKDirty = true
+    if (isFake) {
+      fakeKDirty = true
+      // 假文件层的 k 必定大于最后一层真层的 k：输入小了就顶回去
+      const reals = realLevels()
+      const last = reals[reals.length - 1]
+      if (last && lv.k <= last.k) {
+        lv.k = last.k + 1
+        kIn.value = String(lv.k)
+      }
+    }
     // 真层链严格递增（k₁ < k₂ < … ，至少相差 1；假层不在此列）：
     // 本层改大越过后面 → 后面逐层 +1 抬上去；本层改小低于前面 → 前面逐层 −1 压下来
     if (!isFake) normalizeChain(lv)
@@ -412,13 +459,15 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
     if (!isFake) {
       const maxK = Math.max(...realLevels().map((l) => l.k))
       if (maxK > nShares) setNShares(maxK)
+      // 真层抬升后假层可能不再大于末层：跟着顶上去
+      enforceFakeK()
     }
     syncOver()
     refreshSplitBtn()
   })
   kIn.addEventListener('blur', () => { kIn.value = String(lv.k) })
   kInputs.set(lv, kIn)
-  row.append(el('label', 'lv-cell lv-k', 'k ', kIn))
+  row.append(el('label', 'lv-cell lv-k', '需要 ', kIn, ' 人才能解锁'))
   if (overHint) row.append(overHint)
 
   const del = el('button', 'btn share-btn lv-del', '×') as HTMLButtonElement
@@ -436,7 +485,18 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
     }
     renderLevels()
   })
-  row.append(del)
+  // 「显示k」：勾上才把这一层的 k 写进分片文本；默认不写，
+  // 恢复端从该层密文的 0x02 K 读。参与者看到的就变成「1万 - ? - ? - 2万」。
+  const showK = document.createElement('input')
+  showK.type = 'checkbox'
+  showK.className = 'lv-showk'
+  showK.checked = lv.showK
+  showK.title = '显示解密本层所需的密钥分片数量'
+  const showKLabel = el('label', 'lv-showk-cell', '显示k', showK)
+  showK.addEventListener('change', () => {
+    lv.showK = showK.checked
+  })
+  row.append(showKLabel, del)
   return row
 }
 
@@ -485,6 +545,11 @@ function syncAlignUi(): void {
   cb.disabled = n >= 2
   cb.checked = alignEnabled
   $<HTMLElement>('alignOpts').hidden = !alignEnabled
+  // 「隐藏 n」开关与对齐同一规则：0/1 层可选，≥2 层强制勾选锁定
+  const hn = $<HTMLInputElement>('hideNCheck')
+  if (n >= 2) hideN = true
+  hn.disabled = n >= 2
+  hn.checked = hideN
   syncFakeUi()
 }
 
@@ -521,6 +586,7 @@ function addFake(): void {
     name: '',
     size: randSize(stats),
     k: fakeK(reals.map((l) => l.k), nShares),
+    showK: false,
   })
   sealed = true
   fakeKDirty = false
@@ -556,8 +622,8 @@ $<HTMLButtonElement>('btnApplyFake').addEventListener('click', resetFake)
 function refreshSplitBtn(): void {
   const ok =
     levels.length > 0 &&
-    realLevels().every((l) => l.file && l.k >= 2 && l.k <= nShares) &&
-    (fakeLevel()?.k ?? 2) >= 2
+    realLevels().every((l) => l.file && l.k >= 1 && l.k <= nShares) &&
+    (fakeLevel()?.k ?? 1) >= 1
   $<HTMLButtonElement>('btnSplit').disabled = !ok
 }
 
@@ -852,8 +918,10 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
         { tag: TSCF.TAG.K, value: u32beBytes(ksChain[i]!) },
         // n 只写在单层密文的这一层上。多层链里绝不写：那会让"总片数"这种
         // 全局信息出现在每一层，既多占字节，又与"每层只暴露自己 k"的设想相悖。
-        // 代价是恢复端拿不到 n，不能断言 k > n（见恢复流程里的 nHere）。
-        ...(chain === 1 ? [{ tag: TSCF.TAG.N, value: u32beBytes(n) }] : []),
+        // 0x03 N 是否写进明文结构，唯一权威是「隐藏总共分发的密钥数量」开关：
+        // 勾上（或多层强制隐藏）就不写，恢复端只知道「还差 x 片」；
+        // 不勾且单层才写，恢复端能据此断言「永远凑不齐」。
+        ...(chain === 1 && !hideN ? [{ tag: TSCF.TAG.N, value: u32beBytes(n) }] : []),
         { tag: TSCF.TAG.IV, value: iv },
         { tag: TSCF.TAG.CIPHERTEXT, value: ciphertext },
       ])
@@ -873,18 +941,21 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
       n,
       splitKs,
       stageProgress(run, 62, 98, '分片'),
+      // 隐藏 n 时单层也用宽坐标：x 在 [1, MAX_SHARES] 里随机，位数不暴露 n
+      hideN,
     )
     const view = new Uint8Array(buffer)
     const unitBytes = 32
     const shareTexts: string[] = new Array(count)
     for (let i = 0; i < count; i++) {
       const base = i * shareLen
-      // x 只写一次：TSK1:x:k1:y1:k2:y2…
-      const parts: string[] = [SHARE_PREFIX, coordText(xs[i]!, wide)]
+      // x 只写一次；组与组用逗号分隔，组内 "k:y" 或裸 "y"（该层没勾「显示k」）
+      const groups: string[] = []
       for (let j = 0; j < total; j++) {
-        parts.push(String(ksAll[j]), toB64(view.subarray(base + j * unitBytes, base + (j + 1) * unitBytes)))
+        const b64 = toB64(view.subarray(base + j * unitBytes, base + (j + 1) * unitBytes))
+        groups.push(j < chain && plan[j]!.showK ? `${ksAll[j]}:${b64}` : b64)
       }
-      shareTexts[i] = parts.join(':')
+      shareTexts[i] = [SHARE_PREFIX, coordText(xs[i]!, wide), groups.join(',')].join(':')
     }
 
     splitResult = {
@@ -1066,7 +1137,7 @@ function importShareText(text: string): { added: number; errors: string[] } {
       errors.push(err instanceof Error ? err.message : String(err))
     }
   }
-  if (recognized === 0) errors.push('没有识别到分片（格式应为 TSK1:x:k:y…，一条一行）')
+  if (recognized === 0) errors.push('没有识别到分片（格式应为 TSK1:x:k:y,y,…，一条一行）')
   return { added, errors }
 }
 
@@ -1174,7 +1245,7 @@ function renderShareList(): void {
       renderShareList()
       refreshRestoreBtn()
     })
-    const ks = s.levels.map((l) => l.k)
+    const ks = s.levels.map((l) => l.k ?? '?')
     const kBrief = ks.length > 3 ? `${ks[0]}…${ks[ks.length - 1]}` : ks.join('/')
     row.append(
       el('span', 'mini-idx', `#${s.index}`),
@@ -1200,8 +1271,8 @@ function refreshRestoreBtn(): void {
     return
   }
   const shares = [...shareMap.values()]
-  // 第 1 层的 k 必须与最外层密文一致；更深层的 k 在链里逐层核对
-  const bad = shares.find((s) => s.levels[0]!.k !== activeCt!.k)
+  // 第 1 层的 k（分片里写了的话）必须与最外层密文一致；没写就由密文说了算
+  const bad = shares.find((s) => s.levels[0]!.k != null && s.levels[0]!.k !== activeCt!.k)
   if (bad) {
     status.textContent = `⚠️ 有分片第 1 层 k=${bad.levels[0]!.k} 与密文 k=${activeCt.k} 不一致`
     btn.disabled = true
@@ -1286,7 +1357,8 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
     const ks = checkConsistency(shares, activeCt!.k)
     // 分片里的组数 ≠ 层数：多出来的是诱饵（没有对应密文）
     const slots = ks.length
-    run.line(`分片自洽：${shares.length} 片 · 每片 ${slots} 组密钥 · k=${ks.slice(0, 6).join('/')}${slots > 6 ? '…' : ''}`)
+    const kText = ks.map((k) => k ?? '?').join('/')
+    run.line(`分片自洽：${shares.length} 片 · 每片 ${slots} 组密钥 · k=${kText.slice(0, 18)}${kText.length > 18 ? '…' : ''}`)
 
     const card = $('restoreCard')
     const list = $('restoreList')
@@ -1314,7 +1386,8 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
       // 用户完全可能只导入了 n 片里的 3 片，那样会把"还差几片"误报成"永远凑不齐"。
       const nBytes = tscf.chunks.get(TSCF.TAG.N)
       const nHere = nBytes ? beBytesToUint(nBytes) : null
-      if (kHere !== ks[j])
+      // 分片里写了 k 就和密文交叉核对；没写（该层没勾「显示k」）就由密文说了算
+      if (ks[j] != null && ks[j] !== kHere)
         throw new Error(`第 ${j + 1} 层密文的 k=${kHere} 与分片 k=${ks[j]} 不一致，可能拿错了分片`)
 
       // 不够就停：更深层套在这一层里面，没有这一层的密钥连字节都拿不到

@@ -221,7 +221,11 @@ check('n=300 跨区间挑片可恢复', bytesEq(
   key,
 ))
 check('n=65536 时每组依然 32 字节（x 不进载荷）', (await shamirSplit(key, 65536, 3)).shares.every((s) => s.length === 32))
-check('k=1 报错', await shamirSplit(key, 3, 1).then(() => false, () => true))
+check('k=1 合法：单片即秘密本身', await (async () => {
+  const r = await shamirSplit(key, 4, 1)
+  return (await shamirCombine([r.shares[2]!], [r.xs[2]!])).every((b, i) => b === key[i])
+})())
+check('0 片报错', await shamirCombine([], []).then(() => false, () => true))
 check('k > n 报错', await shamirSplit(key, 3, 4).then(() => false, () => true))
 
 // 4c) 素域下的损坏 / 恶意分片
@@ -316,12 +320,12 @@ check('多层拆分：每人一个坐标', multi.xs.length === 7 && new Set(mult
 const UNIT = 32
 const multiTexts: string[] = []
 for (let i = 0; i < multi.count; i++) {
-  const parts = ['TSK1', String(multi.xs[i])]
+  const groups: string[] = []
   for (let j = 0; j < 3; j++) {
     const from = i * multi.shareLen + j * UNIT
-    parts.push(String(LEVEL_KS[j]), toB64(multi.buffer.subarray(from, from + UNIT)))
+    groups.push(`${LEVEL_KS[j]}:${toB64(multi.buffer.subarray(from, from + UNIT))}`)
   }
-  multiTexts.push(parts.join(':'))
+  multiTexts.push(['TSK1', String(multi.xs[i]), groups.join(',')].join(':'))
 }
 const mp = parseShares(multiTexts.join('\n'))
 check('多层分片解析出 3 组', mp.length === 7 && mp.every((s) => s.levels.length === 3))
@@ -376,12 +380,14 @@ check('诱饵组：没有秘密也能拆，y 照样是 32 字节随机值', awai
   const pad = await shamirSplitMulti([keyA, null, null], 5, [2, 999, 1000])
   if (pad.m !== 3 || pad.shareLen !== 96) return false
   const texts = Array.from({ length: pad.count }, (_, i) => {
-    const parts = ['TSK1', String(pad.xs[i])]
+    const groups: string[] = []
     for (let j = 0; j < 3; j++) {
       const from = i * pad.shareLen + j * UNIT
-      parts.push(String([2, 999, 1000][j]), toB64(pad.buffer.subarray(from, from + UNIT)))
+      const b64 = toB64(pad.buffer.subarray(from, from + UNIT))
+      // 混装：第 1 组带 k，后两组是裸 y（没勾「显示k」的层长这样）
+      groups.push(j === 0 ? `2:${b64}` : b64)
     }
-    return parts.join(':')
+    return ['TSK1', String(pad.xs[i]), groups.join(',')].join(':')
   })
   const p = parseShares(texts.join('\n'))
   const recovered = await shamirCombine(
@@ -390,8 +396,74 @@ check('诱饵组：没有秘密也能拆，y 照样是 32 字节随机值', awai
   )
   return (
     bytesEq(recovered, keyA) &&
-    p.every((s) => s.levels.length === 3 && s.levels[1]!.payload.length === 32)
+    p.every(
+      (s) =>
+        s.levels.length === 3 &&
+        s.levels[0]!.k === 2 &&
+        s.levels[1]!.k === null &&
+        s.levels[2]!.k === null &&
+        s.levels[1]!.payload.length === 32,
+    )
   )
+})())
+
+// 9c) 「显示k」：每层独立决定写不写 k；损坏格式一律报「密钥损坏」
+const yB9 = toB64(randomBytes(32))
+const yC9 = toB64(randomBytes(32))
+check('裸 y 组解析为 k=null', parseShareLine(`TSK1:7:${yB9}`)?.levels[0]?.k === null)
+check('k:y 组解析出 k', parseShareLine(`TSK1:7:5:${yB9}`)?.levels[0]?.k === 5)
+check('混装：带 k 与裸 y 组混排', (() => {
+  const e = parseShareLine(`TSK1:7:3:${yB9},${yC9},9:${yB9}`)
+  return !!e && e.levels.map((l) => String(l.k)).join('/') === '3/null/9'
+})())
+check('encodeShare/parse 往返（k=null 与 k 混装）', (() => {
+  const text = encodeShare({
+    index: 7,
+    wide: true,
+    levels: [{ k: null, payload: keyA }, { k: 4, payload: randomBytes(32) }],
+  })
+  const p = parseShareLine(text)
+  return p?.index === 7 && p.wide === true && p.levels[0]?.k === null && p.levels[1]?.k === 4
+})())
+check('一组的冒号多于一个 → 密钥损坏', (() => {
+  try {
+    parseShareLine(`TSK1:7:3:${yB9}:5`)
+    return false
+  } catch (e) {
+    return String(e).includes('密钥损坏')
+  }
+})())
+check('既不是 k 也不是 y 的段 → 密钥损坏', (() => {
+  try {
+    parseShareLine(`TSK1:7:hello,${yB9}`)
+    return false
+  } catch (e) {
+    return String(e).includes('密钥损坏')
+  }
+})())
+check('k=0 / k 超上限 → 密钥损坏', (() => {
+  try {
+    parseShareLine(`TSK1:7:0:${yB9}`)
+    return false
+  } catch {
+    return true
+  }
+})())
+check('checkConsistency：没写 k 的组返回 null，首层片数用密文 k 判断', (() => {
+  const t1 = parseShareLine(`TSK1:3:${yB9},${yC9}`)!
+  const t2 = parseShareLine(`TSK1:4:${yB9},${yC9}`)!
+  const ks = checkConsistency([t1, t2], 2)
+  return ks.map((k) => String(k)).join(',') === 'null,null'
+})())
+check('checkConsistency：一端写 k 一端没写 → 不是同一批', (() => {
+  const t1 = parseShareLine(`TSK1:3:2:${yB9}`)!
+  const t2 = parseShareLine(`TSK1:4:${yB9}`)!
+  try {
+    checkConsistency([t1, t2])
+    return false
+  } catch {
+    return true
+  }
 })())
 
 // 10) 密文链：NEXT 在 TSPK 内层，且是末块
@@ -476,8 +548,8 @@ check('nextK：等差序列顺着走（3,4 → 5）', nextK([3, 4]) === 5)
 check('nextK：两点歧义时按等差续（4,8 → 12）', nextK([4, 8]) === 12)
 check('nextK：三点等比继续放大（4,8,16 → 32）', nextK([4, 8, 16]) === 32)
 check('nextK：无规律时 +1（3,7,8 → 9）', nextK([3, 7, 8]) === 9)
-check('fakeK 默认不超过 n', fakeK([3, 4], 5) === 5 && fakeK([3], 5) === 4)
-check('fakeK 不受 n 限制地跟随规律', fakeK([4, 8, 16], 10) === 10)
+check('fakeK 必定大于最后一层真层 k（等差续接）', fakeK([3, 4], 5) === 5 && fakeK([3], 5) === 4)
+check('fakeK 跟随等比规律，不被 n 封顶', fakeK([4, 8, 16], 10) === 32)
 
 check('k 等差规律被识别', kPattern([3, 5, 7])?.type === 'arith' && kPattern([3, 5, 7])?.step === 2)
 check('k 等比规律被识别', kPattern([4, 8, 16])?.type === 'geo' && kPattern([4, 8, 16])?.step === 2)
@@ -499,7 +571,7 @@ check('padKs 顺着等比规律放大', (() => {
   const pad = padKs([4, 8, 16], 6, [4, 8, 16])
   return pad.join(',') === '32,64,128'
 })())
-check('假层 k 可以超过 n（唯一允许的一层）', fakeK([3, 4], 5) <= 5 && 999 > 5)
+check('假层 k 恒大于末层真层 k，允许超过 n（唯一允许的一层）', fakeK([3, 4], 5) > 4 && fakeK([4, 8, 16], 10) > 10)
 
 // kPattern 本身对 3 点等比给出 geo
 check('三点等比被识别为等比', kPattern([4, 8, 16])?.type === 'geo')

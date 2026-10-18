@@ -125,6 +125,8 @@ export async function shamirSplitMulti(
   n: number,
   ks: number[],
   onProgress?: (done: number, total: number) => void,
+  /** 强制宽坐标：隐藏 n 时用（单层也随机取 1..MAX，否则 x 的位数会暴露 n） */
+  wideCoords = false,
 ): Promise<{
   buffer: Uint8Array
   shareLen: number
@@ -153,7 +155,7 @@ export async function shamirSplitMulti(
       continue
     }
     if (secret.length !== SECRET_LEN) throw new Error(`秘密必须是 ${SECRET_LEN} 字节，当前 ${secret.length}`)
-    if (!Number.isInteger(k) || k < 2) throw new Error(`第 ${j + 1} 层 k 至少为 2`)
+    if (!Number.isInteger(k) || k < 1) throw new Error(`第 ${j + 1} 层 k 至少为 1`)
     if (n < k) throw new Error(`第 ${j + 1} 层 k=${k} 超过总片数 n=${n}`)
     const s = bytesToField(secret)
     // 正常流程不会走到这里：密钥由 randomFieldBytes 生成，天然 < P。
@@ -173,7 +175,9 @@ export async function shamirSplitMulti(
 
   // 单层用紧凑坐标（1..n 洗牌），两层及以上一律宽坐标：
   // 否则 x 的字节宽度会直接把 n 的数量级告诉持片人。
-  const xs = m > 1 ? randomCoords(n) : compactCoords(n)
+  // 隐藏 n 时单层也强制宽坐标：x 在 [1, MAX_SHARES] 里随机取。
+  const useWide = wideCoords || m > 1
+  const xs = useWide ? randomCoords(n) : compactCoords(n)
 
   const unit = PAYLOAD_LEN
   const shareLen = unit * m
@@ -195,7 +199,7 @@ export async function shamirSplitMulti(
     if (onProgress && (i + 1) % step === 0) onProgress(i + 1, n)
   }
   onProgress?.(n, n)
-  return { buffer, shareLen, count: n, m, xs, wide: m > 1 }
+  return { buffer, shareLen, count: n, m, xs, wide: useWide }
 }
 
 /**
@@ -224,7 +228,7 @@ export async function shamirCombine(
   xs: number[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<Uint8Array> {
-  if (shares.length < 2) throw new Error('至少需要 2 片才能恢复')
+  if (shares.length < 1) throw new Error('至少需要 1 片才能恢复')
   if (xs.length !== shares.length) throw new Error('分片数量与坐标数量不一致')
   const pts = shares.map((buf, i) => ({ x: xs[i]!, y: readY(buf) }))
   const seen = new Set<number>()

@@ -1,10 +1,18 @@
-// 分片文本格式：TSK1:x:k₁:y₁:k₂:y₂…:km:ym
+// 分片文本格式：TSK1:x:组1,组2,…,组m
 //   TSK       = TD Shamir Key，1 为格式版本
 //   x         = 坐标（1..MAX_SHARES），一片只写一次
-//   kᵢ:yᵢ     = 第 i 组的阈值与该组密钥材料（y 为 32 字节的 base64）
+//   组        = "k:y"（带 k）或 "y"（不带 k），组与组用逗号分隔
+//   y         = 32 字节密钥材料的 base64（44 字符，含 '='）
 //
-// x 只出现一次，每组只剩 32 字节的 y，所以一片的长度 ≈ 前缀 + m × 44 字符，
-// 与 n 的大小无关（旧格式每组还要多带 1~3 字节坐标，深链时白白放大几十倍）。
+// 每组独立决定要不要写 k（拆分端按层勾选「显示k」）：
+//   TSK1:04829173:3:AAAA,5:BBBB,CCCC
+//   └ 组1 k=3   └ 组2 k=5   └ 组3 没写 k，恢复端从该层密文的 0x02 K 读
+// 混装合法：同一条分片里有的组带 k、有的不带。
+//
+// 解析规则（不靠猜，靠分隔符）：
+//   组内按冒号切分——1 段 = 裸 y；2 段 = k:y；3 段以上 = 密钥损坏。
+//   k 必须是 1..MAX_SHARES 的十进制整数；y 必须是解码后 32 字节的 base64。
+//   两者都不像（比如空段、超长数字、不是 base64）→ 报「密钥损坏」。
 //
 // x 有两种写法，语义相同、解析方式相同（都是十进制整数）：
 //   紧凑（单层）  "7"          最长 8 位，最短 1 位
@@ -33,12 +41,16 @@ export function coordText(index: number, wide: boolean): string {
   return wide ? s.padStart(WIDE_COORD_DIGITS, '0') : s
 }
 
-// 前缀 + 坐标 + 至少一组 :k:base64
-const SHARE_RE = /^TSK(\d+):(\d+)((?::\d+:[A-Za-z0-9+/]+={0,2})+)$/
+const SHARE_RE = /^TSK(\d+):(\d+):(.+)$/
+const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/
 
-/** 一组的密钥材料：该组阈值 + 该组 y */
+function corrupt(reason: string): never {
+  throw new Error(`密钥损坏（${reason}）`)
+}
+
+/** 一组的密钥材料：该组阈值（未写 = null，恢复端从密文读）+ 该组 y */
 export interface ShareLevel {
-  k: number
+  k: number | null
   /** 32 字节大端的 y */
   payload: Uint8Array
 }
@@ -54,9 +66,37 @@ export interface ShareEntry {
 
 export function encodeShare(entry: ShareEntry): string {
   if (entry.levels.length === 0) throw new Error('分片至少要有一组密钥材料')
-  const parts = [SHARE_PREFIX, coordText(entry.index, entry.wide)]
-  for (const lv of entry.levels) parts.push(String(lv.k), toB64(lv.payload))
-  return parts.join(':')
+  const groups = entry.levels.map((lv) =>
+    lv.k === null ? toB64(lv.payload) : `${lv.k}:${toB64(lv.payload)}`,
+  )
+  return [SHARE_PREFIX, coordText(entry.index, entry.wide), groups.join(',')].join(':')
+}
+
+/** 解析一组（"k:y" 或 "y"），校验 k 与 y 的合法性 */
+function parseGroup(g: string): ShareLevel {
+  const kv = g.split(':')
+  let k: number | null = null
+  let yText: string
+  if (kv.length === 1) {
+    yText = kv[0]!
+  } else if (kv.length === 2) {
+    k = Number(kv[0])
+    if (!/^\d{1,8}$/.test(kv[0]!) || !Number.isInteger(k) || k < 1 || k > MAX_SHARES)
+      corrupt(`k=${kv[0]} 不是 1..${MAX_SHARES} 的整数`)
+    yText = kv[1]!
+  } else {
+    corrupt('一组的冒号多于一个')
+  }
+  if (!B64_RE.test(yText)) corrupt(`y=${yText.slice(0, 12)}… 不是 base64`)
+  let payload: Uint8Array
+  try {
+    payload = fromB64(yText)
+    // readY 校验长度必须是 32 字节、y < p
+    readY(payload)
+  } catch {
+    corrupt('y 不是 32 字节的合法密钥材料')
+  }
+  return { k, payload }
 }
 
 export function parseShareLine(line: string): ShareEntry | null {
@@ -71,17 +111,7 @@ export function parseShareLine(line: string): ShareEntry | null {
   if (!Number.isInteger(index) || index < 1 || index > MAX_SHARES)
     throw new Error(`分片坐标非法：x=${raw}`)
 
-  // m[3] 形如 ":3:AAAA:5:BBBB"，split 后首项为空串
-  const tok = m[3]!.split(':')
-  const levels: ShareLevel[] = []
-  for (let i = 1; i + 1 < tok.length; i += 2) {
-    const k = Number(tok[i])
-    const payload = fromB64(tok[i + 1]!)
-    if (!Number.isInteger(k) || k < 2 || k > MAX_SHARES) throw new Error(`分片参数非法：k=${tok[i]}`)
-    // readY 校验长度必须是 32 字节、y < p
-    readY(payload)
-    levels.push({ k, payload })
-  }
+  const levels = m[3]!.split(',').map(parseGroup)
   if (levels.length === 0) throw new Error('分片没有任何密钥材料')
   return { index, wide: raw.length >= WIDE_COORD_DIGITS, levels }
 }
@@ -99,7 +129,8 @@ export function parseShares(text: string): ShareEntry[] {
     byIndex.set(e.index, e)
   }
   const shares = [...byIndex.values()]
-  if (shares.length === 0) throw new Error(`没有找到任何分片（格式应为 ${SHARE_PREFIX}:x:k:base64）`)
+  if (shares.length === 0)
+    throw new Error(`没有找到任何分片（格式应为 ${SHARE_PREFIX}:x:k:y,y,… 或 ${SHARE_PREFIX}:x:y,y,…）`)
   return shares
 }
 
@@ -111,22 +142,29 @@ export function sameLevels(a: ShareLevel[], b: ShareLevel[]): boolean {
 }
 
 /**
- * 校验同批分片自洽：组数一致、每组 k 一致、片数够第 1 层。
- * 返回每组的 k 列表（下标 0 = 最外层；尾部可能是诱饵）。
+ * 校验同批分片自洽：组数一致、每组的 k 写没写一致且值一致、片数够第 1 层。
+ * 返回每组的 k 列表（下标 0 = 最外层；尾部可能是诱饵；没写 k 的组是 null）。
  */
-export function checkConsistency(shares: ShareEntry[], ctK?: number): number[] {
+export function checkConsistency(shares: ShareEntry[], ctK?: number): (number | null)[] {
   const m = shares[0]!.levels.length
   if (shares.some((s) => s.levels.length !== m))
     throw new Error('各分片的组数不一致，可能不是同一批拆出来的')
   const ks = shares[0]!.levels.map((l) => l.k)
   for (const s of shares) {
-    for (let i = 0; i < m; i++)
-      if (s.levels[i]!.k !== ks[i])
-        throw new Error(`第 ${i + 1} 组阈值不一致（k=${s.levels[i]!.k} 与 k=${ks[i]}），不是同一批分片`)
+    for (let i = 0; i < m; i++) {
+      const k = s.levels[i]!.k
+      if ((k === null) !== (ks[i] === null) || (k !== null && k !== ks[i]))
+        throw new Error(
+          `第 ${i + 1} 组的 k 不一致（${k === null ? '没写' : `k=${k}`} 与 ${
+            ks[i] === null ? '没写' : `k=${ks[i]}`
+          }），不是同一批分片`,
+        )
+    }
   }
-  if (ctK != null && ctK !== ks[0])
+  if (ks[0] != null && ctK != null && ctK !== ks[0])
     throw new Error(`分片第 1 组 k=${ks[0]} 与密文 k=${ctK} 不一致`)
-  if (shares.length < ks[0]!)
-    throw new Error(`第 1 层至少需要 ${ks[0]} 片，当前只有 ${shares.length} 片`)
+  const need = ks[0] ?? ctK
+  if (need != null && shares.length < need)
+    throw new Error(`第 1 层至少需要 ${need} 片，当前只有 ${shares.length} 片`)
   return ks
 }

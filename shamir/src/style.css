@@ -266,6 +266,18 @@ h2:first-child { margin-top: 0; }
   opacity: 0.85;
 }
 .lv-del { margin-left: auto; padding: 0.2rem 0.55rem; font-size: 0.9rem; }
+/* 每层的「显示k」勾选：勾上才把该层 k 写进分片文本（× 左边） */
+.lv-showk-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  color: var(--secondary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.lv-showk-cell input { accent-color: var(--primary); margin: 0; }
 
 /* 「加入更多文件 85% / 加入假文件 15%」 */
 .level-more { margin-top: 0.7rem; }

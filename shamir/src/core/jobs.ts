@@ -62,6 +62,7 @@ export async function splitInWorker(
   n: number,
   ks: number[],
   onProgress?: JobProgress,
+  wideCoords = false,
 ): Promise<{
   buffer: ArrayBuffer
   shareLen: number
@@ -76,7 +77,7 @@ export async function splitInWorker(
     m: number
     xs: number[]
     wide: boolean
-  }>({ type: 'split', secrets, n, ks }, onProgress)
+  }>({ type: 'split', secrets, n, ks, wideCoords }, onProgress)
   return { buffer, shareLen, count: buffer.byteLength / shareLen, m, xs, wide }
 }
 
