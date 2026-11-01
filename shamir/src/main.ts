@@ -229,7 +229,20 @@ let styleId: StyleId = STYLE.PLAIN
  */
 let ctStyleOverride: StyleId | null = null
 /** 拆分端的碎片舞台（只有碎片外观有）；换外观时整份扔掉 */
+/** 这一步拆分视图是按哪套外观建的：换外观（碎片 ↔ 星座）要重建，不能接着用 */
+let splitViewStyle: StyleId | null = null
 let splitView: SplitView | null = null
+
+/**
+ * 这套外观自带整套界面（碎片 / 星座）：拆分端用它自己的格子，
+ * 恢复端也接管 ① 卡（② 导入分片、③ 结果卡都让位）。
+ *
+ * 主流程不认识"长什么样"，只认识"它要不要接管"——新外观只要在
+ * appearance/index.ts 里带了 splitView 或 attachShare，就自动归到这一类。
+ */
+function ownsStage(style: StyleId | null | undefined): boolean {
+  return style === STYLE.FRAGMENT || style === STYLE.CONSTELLATION
+}
 /** 拆分运行中不许再往里塞文件 */
 let splitBusy = false
 
@@ -265,8 +278,8 @@ function syncOverrideUi(): void {
   const cur = ctStyleOverride === null ? OV_NONE : String(ctStyleOverride)
   for (const b of seg.querySelectorAll<HTMLButtonElement>('button[data-ov]'))
     b.classList.toggle('is-active', b.dataset.ov === cur)
-  // 碎片模式下界面本来就是碎片，覆写无从谈起（这一块也已经被 .adv 收起了）
-  $('ovStyleRow').hidden = styleId === STYLE.FRAGMENT
+  // 自带界面的外观下，界面本来就是它自己，覆写无从谈起（这一块也已经被 .adv 收起了）
+  $('ovStyleRow').hidden = ownsStage(styleId)
   $('ovStyleHint').textContent =
     ctStyleOverride === null
       ? '不覆写：密文按当前模式记成「普通」，恢复端就是标准列表。'
@@ -385,7 +398,7 @@ nSharesInput.addEventListener('blur', () => { nSharesInput.value = String(nShare
  * 只在"切到碎片"和"层有任何增减"时重排一次，把 k 与 n 一起拨回来。
  */
 function reclampFragmentShares(): void {
-  if (styleId !== STYLE.FRAGMENT) return
+  if (!ownsStage(styleId)) return
   const reals = realLevels()
   if (reals.length === 0) return
   reals.forEach((l, i) => { l.k = i + 1 })
@@ -455,11 +468,11 @@ function addRealFiles(files: File[]): void {
   for (const f of kept) {
     // 后续层默认比上一层多一片门槛：既符合"越深越难"的直觉，
     // 也让假文件能顺着这个等差规律往下接。
-    // 碎片外观是另一套语义：k 就是"第几块"（第 1 块 1 片、第 2 块 2 片…），
+    // 自带界面的外观是另一套语义：k 就是"第几格"（第 1 格 1 片、第 2 格 2 片…），
     // 所以这里直接按位置给，最后 renderLevels 里还会再统一拨一次。
     const prev = levels.length ? levels[levels.length - 1]!.k : Math.min(3, nShares)
     // 新层默认 k 顺着链 +1；超过 n 不压平，而是把 n 拉到一样大
-    const k = styleId === STYLE.FRAGMENT ? levels.length + 1 : levels.length ? prev + 1 : prev
+    const k = ownsStage(styleId) ? levels.length + 1 : levels.length ? prev + 1 : prev
     if (k > nShares) setNShares(k)
     levels.push({ kind: 'real', name: f.name, size: f.size, k, showK: false, file: f })
   }
@@ -735,18 +748,24 @@ function splitCells(): SplitCell[] {
 }
 
 function syncSplitMode(): void {
-  const frag = styleId === STYLE.FRAGMENT
-  $('splitMain').classList.toggle('is-frag-split', frag)
-  $('fragSplitHost').hidden = !frag
-  if (!frag) {
+  const staged = ownsStage(styleId)
+  $('splitMain').classList.toggle('is-staged-split', staged)
+  $('fragSplitHost').hidden = !staged
+  if (!staged) {
     if (splitView) {
       $('fragSplitHost').textContent = ''
       splitView = null
+      splitViewStyle = null
     }
     return
   }
+  // 碎片 ↔ 星座：视图得按当前外观重建，不能把上一套的格子接着用
+  if (splitView && splitViewStyle !== styleId) {
+    $('fragSplitHost').textContent = ''
+    splitView = null
+  }
   if (!splitView) {
-    const view = createSplitView(STYLE.FRAGMENT)
+    const view = createSplitView(styleId)
     if (!view) return
     view.attach({
       pick: () => fileSplitInput.click(),
@@ -760,6 +779,7 @@ function syncSplitMode(): void {
     })
     $('fragSplitHost').append(view.root)
     splitView = view
+    splitViewStyle = styleId
   }
   splitView.render(splitCells())
 }
@@ -1041,9 +1061,9 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
   // 任意层数、假文件层、高级操作都在），恢复端却会按目标外观呈现。
   // 碎片模式自己就是碎片，不需要也不接受覆写。
   const emit = style === STYLE.PLAIN ? (ctStyleOverride ?? STYLE.PLAIN) : style
-  // 碎片外观把「高级操作」整块收起来了，那就得真用默认值：
+  // 自带界面的外观把「高级操作」整块收起来了，那就得真用默认值：
   // 压缩固定 zstd L3、不碰 OTS——否则之前在普通模式勾过的 OTS 会在用户看不见的地方联网。
-  const quiet = style === STYLE.FRAGMENT
+  const quiet = ownsStage(style)
   const algo = quiet ? ALGO.ZSTD_L3 : currentAlgo()
   // 密钥串里除了真层与假层，还要按"对齐档位"补一批诱饵组
   const total = targetKv()
@@ -1079,9 +1099,9 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
     if (mulmods > 2e7) run.line(`⚠️ 计算量偏大，可能要几十秒到几分钟，页面可以继续滚动`, 'lg-warn')
     if (emit !== style)
       run.line(`外观覆写：密文记成「${styleLabel(emit)}」，插入仍是普通模式`)
-    if (emit === STYLE.FRAGMENT && chain > FRAGMENT_SLOTS)
+    if (ownsStage(emit) && chain > FRAGMENT_SLOTS)
       run.line(
-        `⚠️ 覆写成碎片外观，但恢复端只有 ${FRAGMENT_SLOTS} 格：第 ${FRAGMENT_SLOTS + 1} 层起不会出现在碎玻璃上，只能在「文件信息与校验」里看`,
+        `⚠️ 覆写成「${styleLabel(emit)}」外观，但恢复端只有 ${FRAGMENT_SLOTS} 格：第 ${FRAGMENT_SLOTS + 1} 层起不会出现在那六格上，只能在「文件信息与校验」里看`,
         'lg-warn',
       )
 
@@ -1600,18 +1620,18 @@ function refreshRestoreBtn(): void {
     // 外观可以先选：说清楚"已经记下了，等密文进来生效"，不然点一下像没反应
     const parts: string[] = []
     if (shareMap.size) parts.push(`已导入 ${shareMap.size} 片 — 请先选择密文文件`)
-    if (styleOverride === STYLE.FRAGMENT)
-      // 碎片界面不靠密文成立，它已经摆在那儿了——这时候再说"选好密文后生效"是错的
-      parts.push('碎片界面已就绪：点碎玻璃或把文件拖进来，密文、分片都行')
+    if (ownsStage(styleOverride))
+      // 这套界面不靠密文成立，它已经摆在那儿了——这时候再说"选好密文后生效"是错的
+      parts.push(`${styleLabel(styleOverride)}界面已就绪：点格子或把文件拖进来，密文、分片都行`)
     else if (styleOverride !== null)
       parts.push(`呈现外观：${styleLabel(styleOverride)}（选好密文后生效）`)
     status.textContent = parts.join('；')
     btn.disabled = true
     return
   }
-  // 碎片外观下没有「② 导入分片」那一块，入口是拼图本身：这句就是唯一的说明
-  if (restoreStyle() === STYLE.FRAGMENT && shareMap.size === 0) {
-    status.textContent = '点一下碎玻璃、把分片文件拖进来，都可以补片'
+  // 自带界面的外观没有「② 导入分片」那一块，入口就是那几格本身：这句是唯一的说明
+  if (ownsStage(restoreStyle()) && shareMap.size === 0) {
+    status.textContent = '点一下格子、把分片文件拖进来，都可以补片'
     btn.disabled = true
     return
   }
@@ -1656,7 +1676,7 @@ const shareIntent: ShareIntent = {
 
 /** 视图挂在哪儿：碎片摆进 ① 卡（② 那块消失），其余外观仍用下面的结果卡 */
 function viewHost(style: StyleId): HTMLElement {
-  return style === STYLE.FRAGMENT ? $('fragHost') : $('restoreList')
+  return ownsStage(style) ? $('fragHost') : $('restoreList')
 }
 
 let liveView: RestoreView | null = null
@@ -1680,21 +1700,21 @@ function mountRestoreView(style: StyleId): RestoreView {
   return view
 }
 
-/** 密文变了就换界面：碎片外观下，选了密文立刻能看见那六格碎玻璃 */
+/** 密文变了就换界面：自带界面的外观下，选了密文立刻能看见那几格 */
 function syncRestoreMode(): void {
   const style = restoreStyle()
   // 碎片外观是一整套界面，不是"给密文配的皮肤"：它的入口（点格子 / 拖文件）走的就是
   // ingestFiles 这个通用入口，密文和分片一起吃得下。所以选中它就立刻换过去，
   // 别让人先对着「② 导入分片」等一份密文进来。
-  const frag = style === STYLE.FRAGMENT
+  const staged = ownsStage(style)
   paintRestoreSeg()
-  $('restoreMain').classList.toggle('is-frag', frag)
+  $('restoreMain').classList.toggle('is-staged', staged)
   // 有密文之后 ① 卡的密文投放框才收起来（那之前它是唯一的密文入口）
   $('restoreMain').classList.toggle('has-ct', activeCt !== null)
-  $('fragHost').hidden = !frag
+  $('fragHost').hidden = !staged
   $('restoreCard').hidden = true
 
-  if (!frag) {
+  if (!staged) {
     if (liveView) {
       revokeTracked()
       $('restoreList').textContent = ''
@@ -1769,8 +1789,8 @@ $('restoreStyleSeg').addEventListener('click', (e) => {
   if (!activeCt)
     logLine(
       'restoreLog',
-      id === STYLE.FRAGMENT
-        ? '已切到「碎片」：点碎玻璃或把文件拖进来，密文、分片都行（够 k 片自动开始）'
+      ownsStage(id)
+        ? `已切到「${styleLabel(id)}」：点格子或把文件拖进来，密文、分片都行（够 k 片自动开始）`
         : `已选「${styleLabel(id)}」：等选了密文就按这套呈现`,
       'lg-warn',
     )
@@ -1778,7 +1798,7 @@ $('restoreStyleSeg').addEventListener('click', (e) => {
     logLine(
       'restoreLog',
       `外观已改成「${styleLabel(id)}」：` +
-        (id === STYLE.FRAGMENT
+        (ownsStage(id)
           ? '继续补片，够 k 片会自动开始'
           : '再点一次「恢复文件」就会按这套外观呈现'),
       'lg-warn',
@@ -1851,18 +1871,18 @@ const restoreRun = new Run('restoreLog', 'restoreProg', [
 $<HTMLButtonElement>('btnRestore').addEventListener('click', () => void runRestore())
 
 /**
- * 碎片外观下没有「恢复文件」按钮 —— 碎玻璃本身就是操作台：
+ * 自带界面的外观没有「恢复文件」按钮 —— 那几格本身就是操作台：
  * 拖进/点选补上片，只要片数够 k（btnRestore 的 disabled 就是这件事），就自动开解。
  * 非碎片外观一律不自动跑，仍由用户按按钮决定。
  */
 function autoRestoreIfReady(): boolean {
-  if (restoreStyle() !== STYLE.FRAGMENT || !activeCt || restoreBusy) return false
+  if (!ownsStage(restoreStyle()) || !activeCt || restoreBusy) return false
   if ($<HTMLButtonElement>('btnRestore').disabled) return false
   void runRestore()
   return true
 }
 
-/** 一次完整的恢复：按钮点它，碎片外观补完片也自动点它 */
+/** 一次完整的恢复：按钮点它，自带界面的外观补完片也自动点它 */
 let restoreBusy = false
 
 async function runRestore(): Promise<void> {
@@ -1888,8 +1908,8 @@ async function runRestore(): Promise<void> {
     const style = restoreStyle()
     if (style !== STYLE.PLAIN || styleOverride !== null)
       run.line(`外观：${styleLabel(style)}${styleOverride !== null ? '（手动选择）' : ''}`)
-    // 碎片外观不在这张结果卡里画（拼图就摆在 ① 卡），其余外观照旧
-    if (style !== STYLE.FRAGMENT) card.hidden = false
+    // 自带界面的外观不在这张结果卡里画（格子就摆在 ① 卡），其余外观照旧
+    if (!ownsStage(style)) card.hidden = false
     // 每次恢复都是一份干净视图：上一轮的格子状态不能带过来
     const view = mountRestoreView(style)
     const host = viewHost(style)

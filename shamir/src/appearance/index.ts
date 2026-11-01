@@ -7,6 +7,11 @@
 // 没登记的编号（旧恢复端读到新外观）自动落到默认外观，分片照样能解开。
 
 import { STYLE, type StyleId } from '../core/styles.ts'
+import {
+  CONSTELLATION_SPLIT,
+  createConstellationSplitView,
+  createConstellationView,
+} from './constellation.ts'
 import { createFragmentSplitView, createFragmentView, FRAGMENT_SPLIT } from './fragment.ts'
 import { createPlainView, PLAIN_SPLIT } from './plain.ts'
 import type { RestoreView, SplitPolicy, SplitView, StyleModule } from './types.ts'
@@ -20,6 +25,15 @@ const MODULES = new Map<StyleId, StyleModule>([
       split: FRAGMENT_SPLIT,
       view: createFragmentView,
       splitView: createFragmentSplitView,
+    },
+  ],
+  [
+    STYLE.CONSTELLATION,
+    {
+      id: STYLE.CONSTELLATION,
+      split: CONSTELLATION_SPLIT,
+      view: createConstellationView,
+      splitView: createConstellationSplitView,
     },
   ],
 ])

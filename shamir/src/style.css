@@ -166,24 +166,25 @@ body {
 .seg-sm button:disabled { opacity: 0.45; cursor: not-allowed; }
 .seg-sm[hidden] { display: none; }
 
-/* 碎片外观接管恢复界面：拿掉「② 导入分片」那一整块（点碎片/背景即可补片），
+/* 自带界面的外观（碎片 / 星座）接管恢复界面：拿掉「② 导入分片」那一整块
+   （点格子/背景即可补片），
    也让「③ 已解锁的文件」这张卡空着不出现——拼图本身就是结果。
    补片靠拼图本身，片够了就自动开始解（见 main.ts 的 autoRestoreIfReady）。
    密文投放框只在**已经有密文**时收起：还没密文时它是唯一的密文入口，
    碎片界面自己也要吃密文（碎片可以比密文先选）。 */
-.is-frag #shareBlock,
-.is-frag .file-label,
-.is-frag .import-row { display: none; }
-.is-frag.has-ct #dropCt { display: none; }
+.is-staged #shareBlock,
+.is-staged .file-label,
+.is-staged .import-row { display: none; }
+.is-staged.has-ct #dropCt { display: none; }
 
-/* 碎片外观下的拆分端：整块界面就是那张六格拼图，层列表 / 大投放框 /
+/* 自带界面的外观在拆分端：整块界面就是那六格，层列表 / 大投放框 /
    「分给几个人」/ 假文件层 / 高级操作全都让位——k 按层序自动给，n 跟着最大 k 走。 */
-.is-frag-split #dropSplit,
-.is-frag-split #levelList,
-.is-frag-split #levelMore,
-.is-frag-split #nRow,
-.is-frag-split #fakeBox,
-.is-frag-split .adv { display: none; }
+.is-staged-split #dropSplit,
+.is-staged-split #levelList,
+.is-staged-split #levelMore,
+.is-staged-split #nRow,
+.is-staged-split #fakeBox,
+.is-staged-split .adv { display: none; }
 .frag-host { margin-top: 0.9rem; }
 .frag-host[hidden] { display: none; }
 
