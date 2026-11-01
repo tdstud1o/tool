@@ -1,11 +1,11 @@
-/* ===== 密文外观「碎片」：6 块拼满舞台的碎玻璃 =====
+/* ===== 密文外观「碎片」：六片浮在夜空里的碎玻璃 =====
    舞台在亮/暗两种主题下都用深色：它承托的是画面（和看图、看视频用深底
    是同一种用法），不是页面面板。
 
-   形状是一幅画被切成六块：六块严丝合缝地拼满舞台，缝隙里透出底下的夜空，
-   每块的切线都写在文件末尾的 --poly 里。但**内容互不相干**——每块装的是
-   自己那份密文，谁也拼不出整体，所以别指望把六块拼回一张图。
-   形状共用，内容独立，这就是"碎片"与"拼图"的区别。 */
+   形状是六片玻璃：各有各的折角，还各自歪着一点，缝里透出底下的夜空。
+   切线、取景框、标签锚点都在 fragment.ts 的 SHARDS / GEOM 里算好，
+   这里只写材质。内容互不相干——每块装的是自己那份密文，谁也拼不出整体，
+   所以别指望把六块拼回一张图。形状共用，内容独立，这就是"碎片"与"拼图"的区别。 */
 .frag-stage {
   position: relative;
   width: 100%;
@@ -31,6 +31,8 @@
   inset: 0;
   pointer-events: none;
   background:
+    /* 这里**不画光源**：光源只在玻璃的断口上留下反射，夜空本身还是夜空。
+       在画布中间摆一团亮，读起来是"那里有盏灯"，而不是"光从玻璃上折回来"。 */
     /* 星云：蓝紫 / 深蓝 / 品红 / 青，都压得很低，只在黑里"若有若无" */
     radial-gradient(42% 48% at 17% 12%, rgba(96, 80, 218, 0.46), transparent 68%),
     radial-gradient(34% 42% at 84% 20%, rgba(28, 100, 196, 0.38), transparent 70%),
@@ -141,26 +143,43 @@
   to { opacity: 0.9; }
 }
 
-/* 光晕层：每块碎片背后一片同形状的模糊亮片，只从缝里透出来——
-   夜里的碎玻璃会微微发亮，但光不该盖住画面本身。
-   冷白（接近星光）；暖白在蓝黑底上会显成一条灰。
-   blur 与 clip-path 必须分在两层：同一个元素上 filter 先做、clip 后切，
-   模糊会被切回形状里面，缝里就看不到光了。 */
-.frag-glow {
+/* 边缘高光：整个舞台上一张 SVG，每条边各画三遍（三档不同半径的高斯模糊），
+   叠出"断口外泄的雾 → 断面亮带 → 最里侧的反光"。
+   为什么非得用 SVG 画：碎片是 clip-path 裁出来的，同一个元素上的 filter 在裁剪之前
+   执行，drop-shadow 会被自己裁掉；挂在里面又会被切线切掉一半。
+   这张 SVG 用同一套百分比坐标盖住舞台，所以线和形状永远严丝合缝。 */
+.frag-rims {
   position: absolute;
   inset: 0;
-  filter: blur(9px);
-  transform: scale(1.02);
-  opacity: 0.13;
+  /* 必须写死宽高：SVG 是替换元素，只有 inset 时它按 300×150 的默认尺寸渲染，
+     百分比坐标会整体缩到左上角，高光就跑到碎片里面去了。 */
+  width: 100%;
+  height: 100%;
+  z-index: 3;
   pointer-events: none;
+  overflow: visible;
+  /* 只提亮不压暗：光叠在照片上应该是"照片被照亮"，而不是"照片上盖了一层白膜"。
+     差值全在亮部——照片本来亮的地方过曝成白，本来暗的地方只是微亮，这正是
+     断口反光的样子。stage 有 isolation，混合不会漏到卡片外面。 */
+  mix-blend-mode: plus-lighter;
 }
-.frag-glow::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  clip-path: var(--poly);
-  background: rgba(190, 210, 255, 0.8);
-}
+/* 颜色不在这里定：每块一组，组上挂着自己的径向渐变（以虚拟光源为心，
+   见 fragment.ts 的 LIGHT / DEPTH），描边沿位置取样，靠近光源的那截才亮。
+   这里只管粗细和强度——--rim-w / --rim-o 由这块的前后距离推出来：
+   靠前的宽而亮（挡在别人前面，断面本来就更大），靠后的细而淡。 */
+/* 粗细和强度不在这里写：它们逐段不同（靠光源那头粗而亮，远端收成一根细线），
+   由 fragment.ts 的 RIM_LAYERS 算完直接写成属性，CSS 只管描边本身的形状。
+   三道都过了高斯模糊（BLUR_PX）：糊开的程度决定层次，不是靠叠几根实心线。
+   实心线叠得再多，最粗那根的外缘仍是一条直线——那就是眼睛看见的"光的分界线"，
+   也是它一直显得突兀的真正原因。 */
+.frag-rim-shard line { fill: none; stroke-linejoin: round; }
+/* 空的 / 锁着的 / 假层的玻璃：断面后面什么都没有，光也就透不过来——
+   只留一丝勾出形状。默认就是关着的，因为页面一打开摆出来的正是六块空玻璃；
+   有内容的那几块才由 fragment.ts 改成 is-image / is-file 点亮。
+   不这么做的话，空玻璃上的高光就是两三条悬在黑色夜空里的白线，比照片上刺眼得多。 */
+.frag-rim-shard { opacity: 0.16; transition: opacity 0.45s ease; }
+.frag-rim-shard[data-state="image"],
+.frag-rim-shard[data-state="file"] { opacity: 1; }
 
 /* 碎片本体只负责形状与命中区（命中区跟着 clip-path 走，点缝不会误触发）。
    这里不填色：底下的星空要能透上来，填一层深灰就等于把夜空盖住了；
@@ -199,17 +218,17 @@
   mix-blend-mode: screen;
   pointer-events: none;
 }
-/* 再压一层边缘光影：左上反光、右下渐暗，玻璃才有厚度（不是贴纸） */
+/* 再压一层边缘光影：左上反光、右下渐暗，玻璃才有厚度（不是贴纸）。
+   这里**不放** 1px 的内描边：一圈等宽的实线是最像"描边"的东西，而且它是硬的，
+   再多的边缘柔光也盖不住它——玻璃的边由 .frag-rims 那层去写。 */
 .frag-face::after {
   content: "";
   position: absolute;
   inset: 0;
   z-index: 4;
   background:
-    linear-gradient(112deg, rgba(214, 228, 255, 0.09) 0%, rgba(214, 228, 255, 0.015) 26%, transparent 46%),
-    linear-gradient(155deg, transparent 55%, rgba(0, 0, 0, 0.2)),
-    rgba(200, 220, 255, 0.01);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.13);
+    linear-gradient(112deg, rgba(214, 228, 255, 0.07) 0%, rgba(214, 228, 255, 0.012) 26%, transparent 46%),
+    linear-gradient(155deg, transparent 55%, rgba(0, 0, 0, 0.18));
   pointer-events: none;
 }
 /* 每张图只对自己那块碎片的**包围盒**负责（--bx/--by/--bw/--bh）。
@@ -235,13 +254,15 @@
   transition: opacity 0.5s ease, transform 0.28s ease, filter 0.28s ease;
 }
 .frag-img.is-shown { opacity: 1; }
+/* 假的景深：靠前的块挡在光源和眼睛之间，画面自然更亮一档；远的压一点。
+   幅度很小——它只是让六块不在同一个平面上，不是调色。 */
+.frag-img { filter: brightness(var(--lit, 1)); }
 /* 图片格的颗粒再轻一点：磨砂是质感，不是给照片蒙一层灰 */
 .frag-slot.is-image .frag-face::before { opacity: 0.12; mix-blend-mode: soft-light; }
 /* 图上不放任何"边框"：内描边、暗角、整面白膜，只要有一条，照片边上就会多出一圈灰。
    只留左上一道很淡的斜光当玻璃反光，斜光也压到最低——它是铺在照片上的，浓一点就是灰雾。 */
 .frag-slot.is-image .frag-face::after {
   background: linear-gradient(112deg, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0.02) 22%, transparent 42%);
-  box-shadow: none;
 }
 
 /* hover：只让这一格的画面微微推进一点、亮一点点。
@@ -252,7 +273,7 @@
    怎么动都碰不到轮廓）。 */
 .frag-slot.is-image:hover,
 .frag-slot.is-file:hover { z-index: 2; cursor: pointer; }
-.frag-slot.is-image:hover .frag-img { transform: scale(1.02); filter: brightness(1.06) saturate(1.02); }
+.frag-slot.is-image:hover .frag-img { transform: scale(1.02); filter: brightness(calc(var(--lit, 1) * 1.06)) saturate(1.02); }
 .frag-slot.is-file:hover .frag-doc-box { color: #fff; }
 .frag-slot.is-empty,
 .frag-slot.is-locked,
@@ -333,11 +354,11 @@
 
 /* 格子的标签：编号（圆圈）+ 名字，压在碎片左上角，像图录的注脚。
    标签是舞台的孩子而不是碎片的：碎片本体带 clip-path，标签挂在里面会被切线切掉一半。
-   每块的位置写在文件末尾（.frag-tag[data-i=n]），不跟着形状走。
+   left/top 由 fragment.ts 按这块的形状算出来（贴着它的上缘往里缩一点）。
    照片有亮有暗，纯文字的注脚在白底上就糊了，所以给一枚半透明的胶囊底。 */
 .frag-tag {
   position: absolute;
-  z-index: 3;
+  z-index: 4;
   left: 6%;
   top: 6%;
   display: flex;
@@ -378,44 +399,12 @@
 .frag-tag.is-locked,
 .frag-tag.is-fake { opacity: 0.42; }
 
-/* 6 块碎片：一块一块歪着拼，严丝合缝地铺满舞台，缝窄到刚好透光。
-   每块五组值：
-   - --poly：形状（碎片本体 / 面子 / 光晕共用）
-   - --bx/--by/--bw/--bh：这块形状的**包围盒**，也就是它自己那张照片的取景框
-     （必须跟 --poly 的顶点对得上：bx/by 取顶点里最小的 x/y，bw/bh 取跨度）
-   - --cx/--cy：这块碎片的视觉重心，给非图片内容、以及图片取景的 object-position 用
-   刻意让切线不规整：太整齐就又回到"一张图切成六块"的规整感了。 */
-.frag-stage [data-i="1"] {
-  --poly: polygon(0% 0%, 33% 0%, 30% 13%, 34% 44%, 0% 38%);
-  --bx: 0%; --by: 0%; --bw: 34%; --bh: 44%; --cx: 16%; --cy: 19%;
+/* 窄屏只留编号：舞台被压到 340px 宽时，六个胶囊标签会互相压住。
+   参考图里的角标本来也就是一个圆形编号，名字在恢复端可以点开格子看（下载也靠它）。 */
+@media (max-width: 560px) {
+  .frag-tag { padding: 0.12em; }
+  .frag-tag .frag-name { display: none; }
 }
-.frag-stage [data-i="2"] {
-  --poly: polygon(35% 0%, 68% 0%, 65% 22%, 66% 47%, 36% 46%, 32% 13%);
-  --bx: 32%; --by: 0%; --bw: 36%; --bh: 47%; --cx: 51%; --cy: 22%;
-}
-.frag-stage [data-i="3"] {
-  --poly: polygon(70% 0%, 100% 0%, 100% 47%, 87% 48%, 72% 50%, 68% 20%);
-  --bx: 68%; --by: 0%; --bw: 32%; --bh: 50%; --cx: 85%; --cy: 25%;
-}
-.frag-stage [data-i="4"] {
-  --poly: polygon(76% 53%, 88% 51%, 100% 50%, 100% 100%, 75% 100%);
-  --bx: 75%; --by: 50%; --bw: 25%; --bh: 50%; --cx: 88%; --cy: 76%;
-}
-.frag-stage [data-i="5"] {
-  --poly: polygon(70% 48%, 67% 72%, 71% 100%, 43% 100%, 41% 49%);
-  --bx: 41%; --by: 48%; --bw: 30%; --bh: 52%; --cx: 57%; --cy: 76%;
-}
-.frag-stage [data-i="6"] {
-  --poly: polygon(0% 40%, 18% 43%, 36% 47%, 39% 100%, 0% 100%);
-  --bx: 0%; --by: 40%; --bw: 39%; --bh: 60%; --cx: 18%; --cy: 72%;
-}
-
-.frag-tag[data-i="1"] { left: 2.5%; top: 3.5%; }
-.frag-tag[data-i="2"] { left: 38%; top: 3%; }
-.frag-tag[data-i="3"] { left: 72%; top: 3%; }
-.frag-tag[data-i="4"] { left: 78%; top: 56%; max-width: 21%; }
-.frag-tag[data-i="5"] { left: 44%; top: 56%; }
-.frag-tag[data-i="6"] { left: 2%; top: 44%; }
 
 /* 点亮时淡入：先摆空舞台，恢复过程里一块一块亮起来 */
 .frag-slot.is-image,

@@ -80,7 +80,9 @@ body {
 }
 
 .wrap {
-  max-width: 680px;
+  /* 900px：碎片舞台要横向铺开才有"碎玻璃浮在夜空"的架势，
+     680px 时两侧留白比内容还宽。 */
+  max-width: 900px;
   margin: 0 auto;
   padding: clamp(1rem, 3vw, 2rem) clamp(0.7rem, 2.5vw, 1rem) 3rem;
   display: flex;
