@@ -7,6 +7,7 @@ import { toB64 } from '../src/core/b64.ts'
 import { MAX_SHARES, P, bytesToField, randomFieldBytes } from '../src/core/gfp.ts'
 import { coordText, encodeShare, parseShareLine, parseShares, checkConsistency } from '../src/core/format.ts'
 import { parseOts, isAllowedCalendarUri } from '../src/core/ots.ts'
+import { STYLE, FRAGMENT_SLOTS, readStyle, sniffImageMime, styleBytes, styleLabel } from '../src/core/styles.ts'
 import { bytesEq, cat, toHex } from '../src/core/b64.ts'
 
 const PENDING_TAG = Uint8Array.from([0x83, 0xdf, 0xe3, 0x0d, 0x2e, 0xf9, 0x0c, 0x8e])
@@ -606,5 +607,64 @@ const fakeBack = await shamirCombine(
 )
 check('假层：3 片确实插值出了那把"假密钥"', bytesEq(fakeBack, fakeSplitKey))
 check('假层：拿这把密钥解密真密文必定失败', await aesDecrypt(fakeBack, fakeIv, fakeCt).then(() => false, () => true))
+
+// 13) 密文外观（style）：外层 0x06，1 字节，缺失/未知一律按默认
+const styledCt = tlvBuild(
+  TSCF.MAGIC,
+  TSCF.VERSION,
+  [
+    { tag: TSCF.TAG.K, value: u32beBytes(2) },
+    { tag: TSCF.TAG.IV, value: randomBytes(12) },
+    { tag: TSCF.TAG.CIPHERTEXT, value: new Uint8Array([1, 2, 3, 4]) },
+    { tag: TSCF.TAG.STYLE, value: styleBytes(STYLE.FRAGMENT) },
+  ],
+)
+const styledBack = tlvParse(TSCF.MAGIC, styledCt)
+check('外观写在 0x06 且是 1 字节', styledBack.chunks.get(TSCF.TAG.STYLE)?.length === 1)
+check('碎片外观可读回', readStyle(styledBack.chunks.get(TSCF.TAG.STYLE)) === STYLE.FRAGMENT)
+check('外观排在最末（tag 6 > 5，不打扰密文块）', (() => {
+  const bytes = styledCt.join(',')
+  const i = bytes.indexOf('5,0,0,0,4,1,2,3,4')
+  const j = bytes.indexOf(`6,0,0,0,1,${STYLE.FRAGMENT}`)
+  return i > 0 && j > i && j + `6,0,0,0,1,${STYLE.FRAGMENT}`.length === bytes.length
+})())
+check('没有 0x06 → 默认外观', readStyle(undefined) === STYLE.PLAIN)
+check('未知编号按默认外观处理（前向兼容）', readStyle(new Uint8Array([200])) === STYLE.PLAIN)
+check('默认外观不写 tag（省 6 字节）', (() => {
+  const plain = tlvBuild(
+    TSCF.MAGIC,
+    TSCF.VERSION,
+    [
+      { tag: TSCF.TAG.K, value: u32beBytes(2) },
+      { tag: TSCF.TAG.IV, value: randomBytes(12) },
+      { tag: TSCF.TAG.CIPHERTEXT, value: new Uint8Array([1]) },
+    ],
+    { lastTag: TSCF.TAG.CIPHERTEXT },
+  )
+  return tlvParse(TSCF.MAGIC, plain).chunks.get(TSCF.TAG.STYLE) === undefined
+})())
+check('外观文案', styleLabel(STYLE.FRAGMENT) === '碎片' && styleLabel(undefined) === '普通')
+check('碎片格数固定 6', FRAGMENT_SLOTS === 6)
+
+// 14) 图片嗅探：只看魔数，不信扩展名/内层 MIME
+const pngHead = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])
+const jpgHead = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46])
+const gifHead = new TextEncoder().encode('GIF89a......')
+const webpHead = (() => {
+  const b = new Uint8Array(16)
+  b.set(new TextEncoder().encode('RIFF'), 0)
+  b.set(new TextEncoder().encode('WEBP'), 8)
+  return b
+})()
+const bmpHead = Uint8Array.from([0x42, 0x4d, 0x36, 0x00])
+const svgText = new TextEncoder().encode('\n<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg"></svg>')
+check('PNG 魔数', sniffImageMime(pngHead) === 'image/png')
+check('JPEG 魔数', sniffImageMime(jpgHead) === 'image/jpeg')
+check('GIF 魔数', sniffImageMime(gifHead) === 'image/gif')
+check('WebP 魔数', sniffImageMime(webpHead) === 'image/webp')
+check('BMP 魔数', sniffImageMime(bmpHead) === 'image/bmp')
+check('SVG 文本（带 XML 声明）', sniffImageMime(svgText) === 'image/svg+xml')
+check('改了名的文本不算图片', sniffImageMime(new TextEncoder().encode('hello world')) === null)
+check('空字节流不算图片', sniffImageMime(new Uint8Array(0)) === null)
 
 process.exit(failed ? 1 : 0)

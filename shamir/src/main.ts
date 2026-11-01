@@ -13,6 +13,7 @@ import {
   type ShareEntry,
 } from './core/format.ts'
 import { fakeK, padKs, randSize, sizeStats, type LevelPlan } from './core/levels.ts'
+import { FRAGMENT_SLOTS, STYLE, STYLE_LIST, readStyle, styleBytes, styleLabel, type StyleId } from './core/styles.ts'
 import {
   OtsNoCorsError,
   calendarHasCors,
@@ -24,6 +25,10 @@ import {
 } from './core/ots.ts'
 import { bytesEq, toB64, toHex } from './core/b64.ts'
 import { buildZip, isZipBuffer, readZip, type ZipReadEntry } from './core/zip.ts'
+import { baseName, download, el, fmtSize, revokeTracked } from './ui/dom.ts'
+import { renderOtsInto } from './ui/otsBox.ts'
+import { createRestoreView, createSplitView, splitPolicy } from './appearance/index.ts'
+import type { RestoreView, ShareIntent, SplitCell, SplitView } from './appearance/types.ts'
 
 /** 拆分结果里最多渲染多少行分片；超出部分折叠（n 可达十万级） */
 const SHARE_ROWS = 50
@@ -46,33 +51,6 @@ function logLine(boxId: string, text: string, cls = ''): void {
   box.append(div)
   box.scrollTop = box.scrollHeight
 }
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  cls: string,
-  ...children: (Node | string)[]
-): HTMLElementTagNameMap[K] {
-  const e = document.createElement(tag)
-  if (cls) e.className = cls
-  for (const c of children) e.append(c)
-  return e
-}
-
-function fmtSize(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`
-  return `${(n / 1024 ** 3).toFixed(2)} GB`
-}
-
-function download(name: string, data: Uint8Array | Blob): void {
-  const url = URL.createObjectURL(data instanceof Blob ? data : new Blob([data]))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  a.click()
-  setTimeout(() => URL.revokeObjectURL(url), 3000)
-}
-
 async function copyText(text: string, btn: HTMLButtonElement): Promise<void> {
   try {
     await navigator.clipboard.writeText(text)
@@ -89,11 +67,6 @@ async function copyText(text: string, btn: HTMLButtonElement): Promise<void> {
   setTimeout(() => (btn.textContent = old), 1200)
 }
 
-function baseName(name: string): string {
-  const i = name.lastIndexOf('.')
-  return i > 0 ? name.slice(0, i) : name
-}
-
 function uuid(): string {
   if (crypto.randomUUID) return crypto.randomUUID()
   const b = randomBytes(16)
@@ -106,12 +79,16 @@ function uuid(): string {
 // ===== 主题 =====
 
 const root = document.documentElement
-$<HTMLButtonElement>('themeToggle').addEventListener('click', () => {
+
+function toggleTheme(): void {
   const cur = root.dataset.theme === 'dark' ? 'dark' : 'light'
   const next = cur === 'dark' ? 'light' : 'dark'
   root.dataset.theme = next
   try { localStorage.setItem('shamir-theme', next) } catch { /* ignore */ }
-})
+}
+
+// 头卡右上角那一枚（图标直接在 index.html 里，暗色看太阳、亮色看月亮）
+$<HTMLButtonElement>('themeToggle').addEventListener('click', toggleTheme)
 
 // ===== Tab 切换 =====
 
@@ -239,6 +216,124 @@ const kInputs = new Map<LevelRow, HTMLInputElement>()
 /** 假层「k > n」角标，n 变了要跟着重算 */
 const kOver = new Map<LevelRow, HTMLElement>()
 
+// ===== 密文外观（style）=====
+// 外观写在 TSCF 外层，拆分时选，恢复时读回来决定怎么呈现。
+//
+// 这里只管"当前选的是哪个"：外观自己的规矩（收什么文件、最多几层、说什么话）
+// 和恢复端怎么画，都在 src/appearance/ 里，通过 splitPolicy()/createRestoreView() 取。
+let styleId: StyleId = STYLE.PLAIN
+/**
+ * 普通模式下的「密文外观覆写」：界面照旧走普通模式（层列表、任意文件、任意层数、假文件层、高级操作），
+ * 只把密文外层记的那个外观换成这里选的，让恢复端按目标外观渲染。
+ * 和 styleId 是两件事——styleId 决定"怎么插入"，它决定"恢复端看到什么"。null = 不覆写。
+ */
+let ctStyleOverride: StyleId | null = null
+/** 拆分端的碎片舞台（只有碎片外观有）；换外观时整份扔掉 */
+let splitView: SplitView | null = null
+/** 拆分运行中不许再往里塞文件 */
+let splitBusy = false
+
+/** 外观选项永远来自 STYLE_LIST：编号、名字、能不能选，都只有那一份清单说了算 */
+function buildStyleSeg(host: HTMLElement): void {
+  host.textContent = ''
+  for (const s of STYLE_LIST) {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.dataset.style = String(s.id)
+    b.textContent = s.label
+    if (s.id === styleId) b.classList.add('is-active')
+    if (!s.splitReady) {
+      b.disabled = true
+      b.title = s.note ?? '暂未开放'
+    }
+    host.append(b)
+  }
+}
+
+const styleSeg = $('styleSeg')
+buildStyleSeg(styleSeg)
+const styleRules = () => splitPolicy(styleId)
+
+// ===== 密文外观覆写（普通模式专属）=====
+// 普通模式要给的是"随你插"：什么文件都能放、想几层几层、还能塞假文件层。
+// 但恢复端长什么样是密文外层那个 tag 说了算，两件事本来捆在一起。
+// 覆写把它们解开：插入仍按普通模式走，只有写进密文的外观换了名字。
+const OV_NONE = 'none'
+
+function syncOverrideUi(): void {
+  const seg = $('ovStyleSeg')
+  const cur = ctStyleOverride === null ? OV_NONE : String(ctStyleOverride)
+  for (const b of seg.querySelectorAll<HTMLButtonElement>('button[data-ov]'))
+    b.classList.toggle('is-active', b.dataset.ov === cur)
+  // 碎片模式下界面本来就是碎片，覆写无从谈起（这一块也已经被 .adv 收起了）
+  $('ovStyleRow').hidden = styleId === STYLE.FRAGMENT
+  $('ovStyleHint').textContent =
+    ctStyleOverride === null
+      ? '不覆写：密文按当前模式记成「普通」，恢复端就是标准列表。'
+      : `密文记成「${styleLabel(ctStyleOverride)}」，恢复端按这套外观呈现；插入流程仍是普通模式——任意文件、任意层数、假文件层全部照旧。`
+}
+
+function buildOverrideSeg(): void {
+  const seg = $('ovStyleSeg')
+  seg.textContent = ''
+  const none = document.createElement('button')
+  none.type = 'button'
+  none.dataset.ov = OV_NONE
+  none.textContent = '不覆写'
+  seg.append(none)
+  for (const s of STYLE_LIST) {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.dataset.ov = String(s.id)
+    b.textContent = s.label
+    if (!s.splitReady) {
+      b.disabled = true
+      b.title = s.note ?? '暂未开放'
+    }
+    seg.append(b)
+  }
+  syncOverrideUi()
+}
+// 记住上次的覆写（星座没实现，读到它当作不覆写）
+try {
+  const saved = localStorage.getItem('shamir-style-override') ?? OV_NONE
+  const id = Number(saved)
+  if (saved !== OV_NONE && STYLE_LIST.some((s) => s.id === id && s.splitReady)) ctStyleOverride = id
+} catch { /* ignore */ }
+buildOverrideSeg()
+
+$('ovStyleSeg').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-ov]')
+  if (!b || b.disabled) return
+  const raw = b.dataset.ov ?? OV_NONE
+  ctStyleOverride = raw === OV_NONE ? null : (Number(raw) as StyleId)
+  try { localStorage.setItem('shamir-style-override', raw) } catch { /* ignore */ }
+  syncOverrideUi()
+})
+
+function applyStyle(id: StyleId): void {
+  styleId = id
+  for (const b of styleSeg.querySelectorAll<HTMLButtonElement>('button'))
+    b.classList.toggle('is-active', Number(b.dataset.style) === id)
+  const rules = splitPolicy(id)
+  // accept 只是给系统的提示，真正的拦截在 addRealFiles 里
+  fileSplitInput.accept = rules.accept
+  $('dropSplitText').textContent = rules.dropText
+  $<HTMLButtonElement>('btnAddMore').textContent = rules.dropText
+  try { localStorage.setItem('shamir-style', String(id)) } catch { /* ignore */ }
+  // 碎片外观有自己的一套片数规矩（第 i 块要 i 片），切进来就先把 k/n 排好；
+  // 排完必须重画层列表——输入框里写的是上一套外观留下的数字，不能让它停在界面上
+  reclampFragmentShares()
+  syncOverrideUi()
+  // 碎片外观有自己的插入界面（同一套玻璃），其余外观用层列表
+  if (levels.length) {
+    renderLevels()
+    return
+  }
+  syncSplitMode()
+  refreshSplitBtn()
+}
+
 const realLevels = (): LevelRow[] => levels.filter((l) => l.kind === 'real')
 const fakeLevel = (): LevelRow | undefined => levels.find((l) => l.kind === 'fake')
 
@@ -279,6 +374,30 @@ nSharesInput.addEventListener('input', () => {
 })
 nSharesInput.addEventListener('blur', () => { nSharesInput.value = String(nShares) })
 
+/**
+ * 碎片外观的片数规矩：**第 i 块要 i 片**（1、2、3…），n 正好等于文件数。
+ *
+ * 于是每多一片就多解开一个文件：1 片开第 1 块，2 片连第 2 块一起开，凑齐 n 片全开。
+ * 六块之间没有"拼图"关系，各自是一份独立内容，所以这里也不需要"越深越难"那套
+ * 递增规律——门槛就是它在舞台上的位置。
+ *
+ * 这是外观自己的语义，不是通用链规则：普通模式的层列表照旧 3、4、5… 随便改；
+ * 只在"切到碎片"和"层有任何增减"时重排一次，把 k 与 n 一起拨回来。
+ */
+function reclampFragmentShares(): void {
+  if (styleId !== STYLE.FRAGMENT) return
+  const reals = realLevels()
+  if (reals.length === 0) return
+  reals.forEach((l, i) => { l.k = i + 1 })
+  // 假层恒定排在最后一个真层之后：照例是"永远解不开"的那一块
+  const f = fakeLevel()
+  if (f && !fakeKDirty) f.k = reals.length + 1
+  const n = Math.max(2, reals.length)
+  if (nShares === n) return
+  nShares = n
+  nSharesInput.value = String(n)
+}
+
 function bindDrop(hosts: HTMLElement[], multiple: boolean, onFiles: (files: File[]) => void): HTMLInputElement {
   const input = document.createElement('input')
   input.type = 'file'
@@ -311,12 +430,36 @@ function bindDrop(hosts: HTMLElement[], multiple: boolean, onFiles: (files: File
 
 function addRealFiles(files: File[]): void {
   if (sealed) return
-  for (const f of files) {
+  // 外观可以规定"只收某类文件 / 最多几层"：不合规的先剔掉，但每类都写日志——
+  // 静默丢文件比报错更讨厌。
+  const rules = styleRules()
+  const kept = files.filter((f) => rules.accepts(f))
+  if (kept.length < files.length)
+    logLine(
+      'runLog',
+      `「${styleLabel(styleId)}」外观只收${rules.acceptLabel}，已忽略 ${files.length - kept.length} 个文件`,
+      'lg-warn',
+    )
+  if (Number.isFinite(rules.maxLayers)) {
+    const room = rules.maxLayers - realLevels().length
+    if (kept.length > room) {
+      logLine(
+        'runLog',
+        `「${styleLabel(styleId)}」外观最多 ${rules.maxLayers} 层，已忽略后 ${kept.length - Math.max(0, room)} 个文件`,
+        'lg-warn',
+      )
+      kept.length = Math.max(0, room)
+    }
+  }
+  if (kept.length === 0) return
+  for (const f of kept) {
     // 后续层默认比上一层多一片门槛：既符合"越深越难"的直觉，
-    // 也让假文件能顺着这个等差规律往下接
+    // 也让假文件能顺着这个等差规律往下接。
+    // 碎片外观是另一套语义：k 就是"第几块"（第 1 块 1 片、第 2 块 2 片…），
+    // 所以这里直接按位置给，最后 renderLevels 里还会再统一拨一次。
     const prev = levels.length ? levels[levels.length - 1]!.k : Math.min(3, nShares)
     // 新层默认 k 顺着链 +1；超过 n 不压平，而是把 n 拉到一样大
-    const k = levels.length ? prev + 1 : prev
+    const k = styleId === STYLE.FRAGMENT ? levels.length + 1 : levels.length ? prev + 1 : prev
     if (k > nShares) setNShares(k)
     levels.push({ kind: 'real', name: f.name, size: f.size, k, showK: false, file: f })
   }
@@ -326,6 +469,41 @@ function addRealFiles(files: File[]): void {
 }
 
 const fileSplitInput = bindDrop([$<HTMLElement>('dropSplit'), $<HTMLElement>('btnAddMore')], true, addRealFiles)
+
+styleSeg.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button')
+  if (!btn || btn.disabled) return
+  const id = Number(btn.dataset.style)
+  if (!STYLE_LIST.some((s) => s.id === id && s.splitReady)) return
+  // 已经加进来的层如果不符合新外观的规矩，就不静默切过去：留着它们只会让恢复端
+  // 出现"没有内容的一格"，用户根本不知道为什么。
+  const rules = splitPolicy(id)
+  // 层数也不能超：碎片只有 6 格，第 7 层（含假层）在恢复端根本没有落脚的地方
+  if (Number.isFinite(rules.maxLayers) && levels.length > rules.maxLayers) {
+    logLine(
+      'runLog',
+      `「${styleLabel(id)}」外观只有 ${rules.maxLayers} 格，当前有 ${levels.length} 层，请先撤掉多出来的层`,
+      'lg-warn',
+    )
+    return
+  }
+  const bad = realLevels().filter((l) => l.file && !rules.accepts(l.file))
+  if (bad.length) {
+    logLine(
+      'runLog',
+      `「${styleLabel(id)}」外观只收${rules.acceptLabel}：「${bad[0]!.name}」${bad.length > 1 ? ` 等 ${bad.length} 个` : ''}不符合，请先移除这几层`,
+      'lg-warn',
+    )
+    return
+  }
+  applyStyle(id)
+})
+
+// 记住上次选的外观（星座还没实现，读到它按默认处理）
+try {
+  const saved = Number(localStorage.getItem('shamir-style') ?? STYLE.PLAIN)
+  if (STYLE_LIST.some((s) => s.id === saved && s.splitReady)) applyStyle(saved)
+} catch { /* ignore */ }
 
 $<HTMLInputElement>('alignCheck').addEventListener('change', (e) => {
   alignEnabled = (e.target as HTMLInputElement).checked
@@ -480,18 +658,7 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
   const del = el('button', 'lv-del', '×') as HTMLButtonElement
   del.type = 'button'
   del.title = isFake ? '移除假文件层（重新允许添加文件）' : '移除这一层'
-  del.addEventListener('click', () => {
-    levels = levels.filter((l) => l !== lv)
-    kInputs.delete(lv)
-    kOver.delete(lv)
-    if (isFake) sealed = false
-    if (levels.length === 0) {
-      // 一层不剩，大拖放框回来
-      $('dropSplit').hidden = false
-      $('dropSplitText').textContent = '拖文件到这里，或点击选择（可多选）'
-    }
-    renderLevels()
-  })
+  del.addEventListener('click', () => dropLevel(lv))
   // 「显示k」：勾上才把这一层的 k 写进分片文本；默认不写，
   // 恢复端从该层密文的 0x02 K 读。参与者看到的就变成「1万 - ? - ? - 2万」。
   const showK = document.createElement('input')
@@ -510,7 +677,24 @@ function levelRow(lv: LevelRow, idx: number): HTMLElement {
   return row
 }
 
+/** 撤掉一层：层列表里的 × 和碎片舞台上的 × 走的是同一条路 */
+function dropLevel(lv: LevelRow): void {
+  const wasFake = lv.kind === 'fake'
+  levels = levels.filter((l) => l !== lv)
+  kInputs.delete(lv)
+  kOver.delete(lv)
+  if (wasFake) sealed = false
+  if (levels.length === 0) {
+    // 一层不剩，大拖放框回来
+    $('dropSplit').hidden = false
+    $('dropSplitText').textContent = styleRules().dropText
+  }
+  renderLevels()
+}
+
 function renderLevels(): void {
+  // 层的增减先过一遍外观规矩：碎片模式下 k 就是"第几块"，n 跟着文件数走
+  reclampFragmentShares()
   const list = $('levelList')
   list.textContent = ''
   kInputs.clear()
@@ -531,7 +715,53 @@ function renderLevels(): void {
   if (f) fakeList.append(levelRow(f, levels.length - 1))
 
   syncAlignUi()
+  syncSplitMode()
   refreshSplitBtn()
+}
+
+// ===== 拆分端的碎片舞台 =====
+//
+// 碎片外观下，"插入"和"恢复"是同一块六格拼图：恢复端往外取图，拆分端往里塞图。
+// 这里只做三件事——把层数据喂给舞台、把舞台的动作接回主流程、样式切换时挂/摘。
+function splitCells(): SplitCell[] {
+  return levels.map((l, i) => ({
+    index: i + 1,
+    name: l.kind === 'fake' ? '假文件层' : l.name,
+    size: l.size,
+    k: l.k,
+    fake: l.kind === 'fake',
+    file: l.kind === 'fake' ? null : (l.file ?? null),
+  }))
+}
+
+function syncSplitMode(): void {
+  const frag = styleId === STYLE.FRAGMENT
+  $('splitMain').classList.toggle('is-frag-split', frag)
+  $('fragSplitHost').hidden = !frag
+  if (!frag) {
+    if (splitView) {
+      $('fragSplitHost').textContent = ''
+      splitView = null
+    }
+    return
+  }
+  if (!splitView) {
+    const view = createSplitView(STYLE.FRAGMENT)
+    if (!view) return
+    view.attach({
+      pick: () => fileSplitInput.click(),
+      drop: (files) => addRealFiles(files),
+      // 舞台上的 × 是"第几格"，层数组里就是第几个（假层也占一格）
+      remove: (i) => {
+        const lv = levels[i]
+        if (lv) dropLevel(lv)
+      },
+      allowed: () => !splitBusy,
+    })
+    $('fragSplitHost').append(view.root)
+    splitView = view
+  }
+  splitView.render(splitCells())
 }
 
 /** 密钥串对齐目标：一片里一共几组 k:v（真层 + 假层 + 没有密文的补位组） */
@@ -589,6 +819,12 @@ function syncFakeUi(): void {
 /** 加入唯一的假文件层：必定最后一层，之后不能再加文件 */
 function addFake(): void {
   if (sealed || levels.length === 0) return
+  // 有的外观格数是死的：假层也占一格，凑不出第 7 格
+  const cap = styleRules().maxLayers
+  if (Number.isFinite(cap) && realLevels().length >= cap) {
+    logLine('runLog', `「${styleLabel(styleId)}」外观只有 ${cap} 层，已经排满了`, 'lg-warn')
+    return
+  }
   const reals = realLevels()
   const stats = sizeStats(reals.map((l) => l.size))
   levels.push({
@@ -734,6 +970,8 @@ interface SplitResult {
   realCount: number
   fakeCount: number
   padCount: number
+  /** 拆分时选的外观（产物文案据此写，之后改选择不影响已产出的文件） */
+  style: StyleId
 }
 
 let splitResult: SplitResult | null = null
@@ -741,6 +979,7 @@ let splitResult: SplitResult | null = null
 const splitRun = new Run('runLog', 'runProg', [
   {
     disable: () => {
+      splitBusy = true
       $<HTMLButtonElement>('btnSplit').disabled = true
       $<HTMLButtonElement>('btnAddMore').disabled = true
       $<HTMLButtonElement>('btnAddFake').disabled = true
@@ -753,6 +992,7 @@ const splitRun = new Run('runLog', 'runProg', [
       $('dropSplit').classList.add('is-disabled')
     },
     restore: () => {
+      splitBusy = false
       $<HTMLButtonElement>('btnAddMore').disabled = false
       $<HTMLButtonElement>('btnAddFake').disabled = false
       $<HTMLButtonElement>('btnApplyFake').disabled = false
@@ -795,6 +1035,16 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
   const plan = levels.slice()
   if (plan.length === 0) return
   const chain = plan.length
+  // 外观在这一刻定下来：拆分过程中改选择不该影响这一批产物
+  const style = styleId
+  // 覆写只换"写进密文的那个外观"，不动插入方式：普通模式照旧不受限（任意文件、
+  // 任意层数、假文件层、高级操作都在），恢复端却会按目标外观呈现。
+  // 碎片模式自己就是碎片，不需要也不接受覆写。
+  const emit = style === STYLE.PLAIN ? (ctStyleOverride ?? STYLE.PLAIN) : style
+  // 碎片外观把「高级操作」整块收起来了，那就得真用默认值：
+  // 压缩固定 zstd L3、不碰 OTS——否则之前在普通模式勾过的 OTS 会在用户看不见的地方联网。
+  const quiet = style === STYLE.FRAGMENT
+  const algo = quiet ? ALGO.ZSTD_L3 : currentAlgo()
   // 密钥串里除了真层与假层，还要按"对齐档位"补一批诱饵组
   const total = targetKv()
   const padCount = Math.max(0, total - chain)
@@ -827,6 +1077,13 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
       `第 ${chain} 层 · n=${n} · 预计 ${mulmods.toLocaleString()} 次模乘`,
     )
     if (mulmods > 2e7) run.line(`⚠️ 计算量偏大，可能要几十秒到几分钟，页面可以继续滚动`, 'lg-warn')
+    if (emit !== style)
+      run.line(`外观覆写：密文记成「${styleLabel(emit)}」，插入仍是普通模式`)
+    if (emit === STYLE.FRAGMENT && chain > FRAGMENT_SLOTS)
+      run.line(
+        `⚠️ 覆写成碎片外观，但恢复端只有 ${FRAGMENT_SLOTS} 格：第 ${FRAGMENT_SLOTS + 1} 层起不会出现在碎玻璃上，只能在「文件信息与校验」里看`,
+        'lg-warn',
+      )
 
     // ---------- 逐层准备明文 ----------
     const from = 8
@@ -843,7 +1100,7 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
         const hash = await sha256(bytes)
 
         let ots: Uint8Array | null = null
-        if ($<HTMLInputElement>('otsCheck').checked) {
+        if (!quiet && $<HTMLInputElement>('otsCheck').checked) {
           run.line(`[${i + 1}/${chain}] OTS：提交哈希到公共日历（联网，最长 20s）…`)
           run.indet()
           try {
@@ -853,9 +1110,9 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
           }
         }
 
-        run.line(`[${i + 1}/${chain}] 压缩（${ALGO_LABEL[currentAlgo()]}）…`)
+        run.line(`[${i + 1}/${chain}] 压缩（${ALGO_LABEL[algo]}${quiet ? '，碎片外观的默认值' : ''}）…`)
         run.prog(pct + (to - from) / chain / 3)
-        const packed = await compressData(bytes, currentAlgo())
+        const packed = await compressData(bytes, algo)
         run.line(
           `[${i + 1}/${chain}] ${fmtSize(bytes.length)} → ${fmtSize(packed.bytes.length)}（${packed.note}）`,
           packed.algo === ALGO.NONE ? 'lg-warn' : 'lg-ok',
@@ -933,6 +1190,9 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
         ...(chain === 1 && !hideN ? [{ tag: TSCF.TAG.N, value: u32beBytes(n) }] : []),
         { tag: TSCF.TAG.IV, value: iv },
         { tag: TSCF.TAG.CIPHERTEXT, value: ciphertext },
+        // 外观只写最外层（i === 0 是循环里最后生成的那一个）：
+        // 内层密文被封在上一层的 TSPK 里，谁也看不见，写了也白写。
+        ...(i === 0 && emit !== STYLE.PLAIN ? [{ tag: TSCF.TAG.STYLE, value: styleBytes(emit) }] : []),
       ])
       run.prog(to + ((60 - to) * (chain - i)) / chain)
     }
@@ -976,6 +1236,7 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
       realCount: realLevels().length,
       fakeCount: chain - realLevels().length,
       padCount,
+      style: emit,
     }
     run.line(`完成 ✓ 密文 ${fmtSize(outer.length)} · ${count.toLocaleString()} 片`, 'lg-ok')
     run.end()
@@ -1011,7 +1272,8 @@ function renderSplitResult(payloads: LevelPayload[], hasOts: boolean): void {
   const chainKs = r.ks.slice(0, r.chain)
   const kText = chainKs.length > 4 ? `${chainKs.slice(0, 3).join('/')}…/${chainKs[chainKs.length - 1]}` : chainKs.join('/')
   $('ctMeta').textContent =
-    `第 ${r.chain} 层 · 明文合计 ${fmtSize(totalOrig)} → 密文 ${fmtSize(r.ciphertext.length)} · k=${kText} · n=${nShares}`
+    `第 ${r.chain} 层 · 明文合计 ${fmtSize(totalOrig)} → 密文 ${fmtSize(r.ciphertext.length)} · k=${kText} · n=${nShares}` +
+    (r.style !== STYLE.PLAIN ? ` · ${styleLabel(r.style)}外观` : '')
 
   const box = $('otsBox')
   if (hasOts) {
@@ -1115,6 +1377,8 @@ interface CtEntry {
   bytes: Uint8Array
   k: number
   n?: number // 外层 0x03 N 可省略：缺失时只用分片自带的 n 做一致性校验
+  /** 外层 0x06 STYLE：外观编号（缺失 = 默认） */
+  style: StyleId
 }
 
 let ctEntries: CtEntry[] = []
@@ -1168,7 +1432,7 @@ async function ingestBlob(
       const k = kBytes ? beBytesToUint(kBytes) : 0
       const n = nBytes ? beBytesToUint(nBytes) : undefined
       if (!k) throw new Error('密文缺少 k 参数')
-      const entry: CtEntry = { name, size, bytes: buf, k, n }
+      const entry: CtEntry = { name, size, bytes: buf, k, n, style: readStyle(outer.chunks.get(TSCF.TAG.STYLE)) }
       ctEntries.push(entry)
       activeCt = entry
       handled = true
@@ -1220,6 +1484,8 @@ async function ingestFiles(files: File[]): Promise<void> {
   // 逐个文件写日志 + 逐个重渲染列表会把界面拖死，所以只在文件少时逐条记。
   const verbose = files.length <= 20
   const tally = { shareFiles: 0, shareCount: 0 }
+  /** 这批里有没有换过密文：换了就得重新判断要不要自动开解（见函数末尾） */
+  const ctBefore = activeCt
   let quiet = false
   for (const f of files) {
     try {
@@ -1244,6 +1510,12 @@ async function ingestFiles(files: File[]): Promise<void> {
   renderShareList()
   renderCtList()
   refreshRestoreBtn()
+  syncRestoreMode()
+  // 碎片外观没有「恢复文件」按钮（拼图就是入口）：片够了就直接开解。
+  // 除了"这批里有新片"，还要管**先放片、后放密文**的顺序——密文一进来，
+  // 外壳声明的外观才把界面切成碎片，而那一刻片往往早就够了；
+  // 只认新片的话，这一步永远等不到，用户会以为得再补一片才会开始。
+  if ((tally.shareFiles > 0 && tally.shareCount > 0) || activeCt !== ctBefore) autoRestoreIfReady()
 }
 
 function renderCtList(): void {
@@ -1260,16 +1532,22 @@ function renderCtList(): void {
       if (activeCt === c) activeCt = ctEntries[ctEntries.length - 1] ?? null
       renderCtList()
       refreshRestoreBtn()
+      syncRestoreMode()
     })
     row.append(
       el('span', 'mini-name', `🔐 ${c.name}`),
-      el('span', 'mini-meta', `${fmtSize(c.size)} · k=${c.k}/n=${c.n ?? '?'}`),
+      el('span', 'mini-meta', `${fmtSize(c.size)}${c.style !== STYLE.PLAIN ? ` · ${styleLabel(c.style)}` : ''} · k=${c.k}/n=${c.n ?? '?'}`),
       del,
     )
     row.addEventListener('click', () => {
+      const changed = activeCt !== c
       activeCt = c
       renderCtList()
       refreshRestoreBtn()
+      syncRestoreMode()
+      // 换到这份密文之后界面可能刚变成碎片（片可能早就够了）：这里补一次自动开解。
+      // 点的是已选中的那一行就不重跑——那只是"确认"，不该把已经解锁的结果推倒重来。
+      if (changed) autoRestoreIfReady()
     })
     list.append(row)
   }
@@ -1319,7 +1597,21 @@ function refreshRestoreBtn(): void {
   const btn = $<HTMLButtonElement>('btnRestore')
 
   if (!activeCt) {
-    status.textContent = shareMap.size ? `已导入 ${shareMap.size} 片 — 请先选择密文文件` : ''
+    // 外观可以先选：说清楚"已经记下了，等密文进来生效"，不然点一下像没反应
+    const parts: string[] = []
+    if (shareMap.size) parts.push(`已导入 ${shareMap.size} 片 — 请先选择密文文件`)
+    if (styleOverride === STYLE.FRAGMENT)
+      // 碎片界面不靠密文成立，它已经摆在那儿了——这时候再说"选好密文后生效"是错的
+      parts.push('碎片界面已就绪：点碎玻璃或把文件拖进来，密文、分片都行')
+    else if (styleOverride !== null)
+      parts.push(`呈现外观：${styleLabel(styleOverride)}（选好密文后生效）`)
+    status.textContent = parts.join('；')
+    btn.disabled = true
+    return
+  }
+  // 碎片外观下没有「② 导入分片」那一块，入口是拼图本身：这句就是唯一的说明
+  if (restoreStyle() === STYLE.FRAGMENT && shareMap.size === 0) {
+    status.textContent = '点一下碎玻璃、把分片文件拖进来，都可以补片'
     btn.disabled = true
     return
   }
@@ -1341,6 +1633,158 @@ function refreshRestoreBtn(): void {
 }
 
 const fileCtInput = bindDrop([$<HTMLElement>('dropCt')], true, (files) => void ingestFiles(files))
+
+// ===== 恢复界面：外观接管 =====
+//
+// 密文外壳里声明了外观（0x06），就由那套外观决定"恢复界面长什么样"：
+// 碎片外观直接摆一块碎玻璃在 ① 卡里，点格子或背景就能补分片，
+// 所以「② 导入分片」那一整块（列表 / 输入框 / 从文件导入）都不出现。
+
+/** 外观要补充分片时的两个动作：交给主流程才认识密文与分片格式 */
+const shareIntent: ShareIntent = {
+  pick: () => {
+    const inp = $<HTMLInputElement>('shareFiles')
+    // 碎片界面是个"什么都能往里放"的入口：还没有密文时连类型都不限，
+    // .tscf 和分片文本一起选（ingestFiles 自己按魔数 / TSK1 头分辨）。
+    inp.accept = activeCt ? '.txt,.share,.shares,text/plain' : ''
+    inp.click()
+  },
+  drop: (files) => void ingestFiles(files),
+  // 恢复跑着的时候控件全禁用（Run 里那一套），这里跟着它走
+  allowed: () => !$<HTMLInputElement>('shareFiles').disabled,
+}
+
+/** 视图挂在哪儿：碎片摆进 ① 卡（② 那块消失），其余外观仍用下面的结果卡 */
+function viewHost(style: StyleId): HTMLElement {
+  return style === STYLE.FRAGMENT ? $('fragHost') : $('restoreList')
+}
+
+let liveView: RestoreView | null = null
+/** 这份视图属于哪个密文：换密文就得换一份，不能接着用旧的格子状态 */
+let liveCt: CtEntry | null = null
+/** 这份视图是按哪套外观挂的：外观被手动改过也要重挂 */
+let liveStyle: StyleId = STYLE.PLAIN
+
+/** 挂一份干净视图（每次恢复都重挂：视图内部有状态，复用它会把上一轮的结果带过来） */
+function mountRestoreView(style: StyleId): RestoreView {
+  // 上一轮预览图的 blob URL 回收（预览不撤销，反复恢复会攒一堆）
+  revokeTracked()
+  $('fragHost').textContent = ''
+  $('restoreList').textContent = ''
+  const view = createRestoreView(style)
+  view.attachShare?.(shareIntent)
+  viewHost(style).append(view.root)
+  liveView = view
+  liveCt = activeCt
+  liveStyle = style
+  return view
+}
+
+/** 密文变了就换界面：碎片外观下，选了密文立刻能看见那六格碎玻璃 */
+function syncRestoreMode(): void {
+  const style = restoreStyle()
+  // 碎片外观是一整套界面，不是"给密文配的皮肤"：它的入口（点格子 / 拖文件）走的就是
+  // ingestFiles 这个通用入口，密文和分片一起吃得下。所以选中它就立刻换过去，
+  // 别让人先对着「② 导入分片」等一份密文进来。
+  const frag = style === STYLE.FRAGMENT
+  paintRestoreSeg()
+  $('restoreMain').classList.toggle('is-frag', frag)
+  // 有密文之后 ① 卡的密文投放框才收起来（那之前它是唯一的密文入口）
+  $('restoreMain').classList.toggle('has-ct', activeCt !== null)
+  $('fragHost').hidden = !frag
+  $('restoreCard').hidden = true
+
+  if (!frag) {
+    if (liveView) {
+      revokeTracked()
+      $('restoreList').textContent = ''
+      $('fragHost').textContent = ''
+      liveView = null
+      liveCt = null
+    }
+    return
+  }
+  // 视图带状态（哪一格亮了），换密文或换外观都得重挂一份干净的
+  if (liveView && liveCt === activeCt && liveStyle === style) return
+  mountRestoreView(style)
+}
+
+// ===== 恢复端的外观：密文声明的那份是默认值，用户在 ① 标题右侧还能手动改 =====
+//
+// 外观只决定"这块恢复界面怎么呈现"，跟密码学完全无关：换成哪一套都不会解错文件，
+// 所以允许手动覆盖。换一份密文就恢复成"听密文的"，不把上一份的选择带过去。
+let styleOverride: StyleId | null = null
+let overrideFor: CtEntry | null = null
+
+/**
+ * 这一屏该用哪套外观：用户手选的优先，否则听密文的。
+ *
+ * 手选可以发生在**还没有密文**的时候（那组按钮一开始就在）。这时 overrideFor 是 null，
+ * 意思是"待定"：等第一份密文进来就认它，手选直接生效。之后再换一份密文就恢复成
+ * 听密文的——那是换了一份文件，上一份上的选择不该跟过去。
+ */
+function restoreStyle(): StyleId {
+  if (!activeCt) return styleOverride ?? STYLE.PLAIN
+  if (overrideFor !== activeCt) {
+    if (overrideFor !== null) styleOverride = null
+    overrideFor = activeCt
+  }
+  return styleOverride ?? activeCt.style
+}
+
+/** 分段控件的状态：手选只决定"怎么摆"，跟有没有密文无关，所以永远显示 */
+function paintRestoreSeg(): void {
+  const seg = $('restoreStyleSeg')
+  const cur = restoreStyle()
+  for (const b of seg.querySelectorAll<HTMLButtonElement>('button[data-style]'))
+    b.classList.toggle('is-active', Number(b.dataset.style) === cur)
+}
+
+/**
+ * 恢复跑着的时候这组也锁上：中途换外观会重挂一份视图，正在解锁的那份就白解了
+ * （第 7 层起才有的"只在文件信息里列出"也跟着丢）。没开放的选项关掉后保持关。
+ */
+function setRestoreSegDisabled(on: boolean): void {
+  for (const b of $('restoreStyleSeg').querySelectorAll<HTMLButtonElement>('button[data-style]')) {
+    const ready = STYLE_LIST.find((s) => s.id === Number(b.dataset.style))?.splitReady ?? false
+    b.disabled = on || !ready
+  }
+}
+
+buildStyleSeg($('restoreStyleSeg'))
+$('restoreStyleSeg').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-style]')
+  if (!b || b.disabled) return
+  const id = Number(b.dataset.style)
+  if (id === restoreStyle()) return
+  // 已经摆出来的结果会被换掉（拼图得重拼、结果卡要重画），所以先把话说明白
+  const hadResult = !$('restoreCard').hidden || liveView !== null
+  styleOverride = id
+  // 还没选密文时 overrideFor 留在 null = 待定，等密文进来直接认它
+  overrideFor = activeCt
+  syncRestoreMode()
+  refreshRestoreBtn()
+  // 切成碎片外观、片又已经够：那儿没有按钮，直接开解
+  if (autoRestoreIfReady()) return
+  if (!activeCt)
+    logLine(
+      'restoreLog',
+      id === STYLE.FRAGMENT
+        ? '已切到「碎片」：点碎玻璃或把文件拖进来，密文、分片都行（够 k 片自动开始）'
+        : `已选「${styleLabel(id)}」：等选了密文就按这套呈现`,
+      'lg-warn',
+    )
+  else if (hadResult)
+    logLine(
+      'restoreLog',
+      `外观已改成「${styleLabel(id)}」：` +
+        (id === STYLE.FRAGMENT
+          ? '继续补片，够 k 片会自动开始'
+          : '再点一次「恢复文件」就会按这套外观呈现'),
+      'lg-warn',
+    )
+})
+paintRestoreSeg()
 
 function addShareFromInput(): void {
   const input = $<HTMLInputElement>('shareInput')
@@ -1387,6 +1831,7 @@ const restoreRun = new Run('restoreLog', 'restoreProg', [
       $<HTMLButtonElement>('btnAddShare').disabled = true
       $<HTMLInputElement>('shareFiles').disabled = true
       fileCtInput.disabled = true
+      setRestoreSegDisabled(true)
       $('dropCt').classList.add('is-disabled')
       $<HTMLInputElement>('shareFiles').closest('.file-label')?.classList.add('is-disabled')
     },
@@ -1395,6 +1840,7 @@ const restoreRun = new Run('restoreLog', 'restoreProg', [
       $<HTMLButtonElement>('btnAddShare').disabled = false
       $<HTMLInputElement>('shareFiles').disabled = false
       fileCtInput.disabled = false
+      setRestoreSegDisabled(false)
       $('dropCt').classList.remove('is-disabled')
       $<HTMLInputElement>('shareFiles').closest('.file-label')?.classList.remove('is-disabled')
       refreshRestoreBtn()
@@ -1402,7 +1848,26 @@ const restoreRun = new Run('restoreLog', 'restoreProg', [
   },
 ])
 
-$<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
+$<HTMLButtonElement>('btnRestore').addEventListener('click', () => void runRestore())
+
+/**
+ * 碎片外观下没有「恢复文件」按钮 —— 碎玻璃本身就是操作台：
+ * 拖进/点选补上片，只要片数够 k（btnRestore 的 disabled 就是这件事），就自动开解。
+ * 非碎片外观一律不自动跑，仍由用户按按钮决定。
+ */
+function autoRestoreIfReady(): boolean {
+  if (restoreStyle() !== STYLE.FRAGMENT || !activeCt || restoreBusy) return false
+  if ($<HTMLButtonElement>('btnRestore').disabled) return false
+  void runRestore()
+  return true
+}
+
+/** 一次完整的恢复：按钮点它，碎片外观补完片也自动点它 */
+let restoreBusy = false
+
+async function runRestore(): Promise<void> {
+  if (restoreBusy) return
+  restoreBusy = true
   const run = restoreRun
   run.begin()
   try {
@@ -1414,15 +1879,20 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
     run.line(`分片自洽：${shares.length} 片 · 每片 ${slots} 组密钥 · k=${kText.slice(0, 18)}${kText.length > 18 ? '…' : ''}`)
 
     const card = $('restoreCard')
-    const list = $('restoreList')
-    // 上一轮预览图的 blob URL 回收（预览不撤销，反复恢复会攒一堆）
-    for (const u of restoredUrls) URL.revokeObjectURL(u)
-    restoredUrls.length = 0
-    list.textContent = ''
-    card.hidden = false
     const more = $('restoreMore')
     more.hidden = true
     more.textContent = ''
+
+    // 外观：密文声明的（0x06，只有最外层才有）或用户在 ① 右侧手选的，
+    // 渲染细节全在 src/appearance/：这里只按"还差片 / 假层 / 解开一层"三种事件喂给视图。
+    const style = restoreStyle()
+    if (style !== STYLE.PLAIN || styleOverride !== null)
+      run.line(`外观：${styleLabel(style)}${styleOverride !== null ? '（手动选择）' : ''}`)
+    // 碎片外观不在这张结果卡里画（拼图就摆在 ① 卡），其余外观照旧
+    if (style !== STYLE.FRAGMENT) card.hidden = false
+    // 每次恢复都是一份干净视图：上一轮的格子状态不能带过来
+    const view = mountRestoreView(style)
+    const host = viewHost(style)
 
     const band = (92 - 8) / slots
     let bytes = activeCt!.bytes
@@ -1450,7 +1920,7 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
       if (shares.length < kHere) {
         // 只有"密文自己声明了总片数"且 k 超过它，才是确凿的永远凑不齐
         const impossible = nHere !== null && kHere > nHere
-        list.append(lockedRow(j + 1, kHere, shares.length, impossible ? nHere : null))
+        view.lock(j + 1, kHere, shares.length, impossible ? nHere : null)
         more.hidden = false
         more.textContent = impossible
           ? `第 ${j + 1} 层写着要 ${kHere} 片，可这套密文只拆成 ${nHere} 片：永远凑不齐，这是假层，密文到这儿就结束了。`
@@ -1480,7 +1950,7 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
       try {
         inner = await aesDecrypt(key, iv, ct)
       } catch {
-        list.append(fakeRow(j + 1, kHere))
+        view.fake(j + 1, kHere)
         more.hidden = false
         more.textContent =
           `第 ${j + 1} 层用 ${kHere} 片解出来的密钥打不开它：它是假层（拆分时特意用另一把密钥加密）。` +
@@ -1515,7 +1985,7 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
       const hashOk = expect ? toHex(expect) === toHex(actual) : null
 
       const otsBytes = pack.chunks.get(TSPK.TAG.OTS_RECEIPT) ?? null
-      const item = levelCard({
+      const info = {
         index: j + 1,
         name,
         data,
@@ -1524,9 +1994,10 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
         hashOk,
         hash: actual,
         ots: otsBytes,
-      })
-      list.append(item)
-      if (otsBytes) await renderOtsInto(item.querySelector('.ots-box') as HTMLElement, otsBytes, actual)
+      }
+      // 内容怎么摆由外观决定；回执统一渲染进它给的容器
+      const otsHost = view.unlock(info)
+      if (otsBytes) await renderOtsInto(otsHost, otsBytes, actual)
 
       unlocked++
       run.prog(8 + band * (j + 0.9))
@@ -1542,7 +2013,7 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
     // 链走完后，剩下的组都是诱饵——说清楚它们为什么存在，免得用户以为丢数据了
     const rest = slots - chainLayers
     if ((endedBy === 'end' || endedBy === 'fake') && rest > 0) {
-      list.append(
+      host.append(
         el(
           'div',
           'hint',
@@ -1553,12 +2024,14 @@ $<HTMLButtonElement>('btnRestore').addEventListener('click', async () => {
 
     run.line(`完成 ✓ 解锁 ${unlocked} 层`, 'lg-ok')
     run.end()
-    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    host.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   } catch (e) {
     run.line(`恢复失败：${e instanceof Error ? e.message : String(e)}`, 'lg-err')
     run.fail()
+  } finally {
+    restoreBusy = false
   }
-})
+}
 
 /** 内层没写 FILENAME 时的默认下载名：YYYY-MM-DD.bin（拆分时间优先，否则用当前时间） */
 function defaultName(createdAt: number | null): string {
@@ -1566,204 +2039,3 @@ function defaultName(createdAt: number | null): string {
   const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   return `${ymd}.bin`
 }
-
-/** 本轮恢复产出的预览 blob URL，下一次恢复开始时统一回收 */
-const restoredUrls: string[] = []
-
-/** 图片（按内层 MIME 或扩展名判断）恢复后直接在页面上预览 */
-function isImageName(name: string, mime: string): boolean {
-  if (mime.startsWith('image/')) return true
-  return /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i.test(name)
-}
-
-/** 已解锁的一层 */
-function levelCard(r: {
-  index: number
-  name: string
-  data: Uint8Array
-  mime: string
-  createdAt: number | null
-  hashOk: boolean | null
-  hash: Uint8Array
-  ots: Uint8Array | null
-}): HTMLElement {
-  const box = el('div', 'rest-item')
-  const head = el('div', 'rest-head')
-  head.append(el('span', 'rest-lv', `第 ${r.index} 层`), el('span', 'prod-name', r.name))
-  box.append(head)
-  box.append(
-    el('div', 'prod-meta', `${fmtSize(r.data.length)}${r.createdAt ? ` · ${new Date(r.createdAt).toLocaleString()}` : ' · 时间未记录'}`),
-  )
-  if (isImageName(r.name, r.mime)) {
-    // 本地 blob URL 预览（CSP 的 img-src blob: 已放行）；img 上下文不执行脚本，SVG 也安全
-    const url = URL.createObjectURL(new Blob([r.data], { type: r.mime || 'application/octet-stream' }))
-    restoredUrls.push(url)
-    const img = document.createElement('img')
-    img.className = 'rest-preview'
-    img.src = url
-    img.alt = r.name
-    img.decoding = 'async'
-    box.append(img)
-  }
-  box.append(
-    el(
-      'div',
-      'hash-line',
-      `SHA-256：${toHex(r.hash)}${r.hashOk === false ? '\n⚠️ 与打包时记录的哈希不一致，文件可能被篡改！' : ''}`,
-    ),
-  )
-  const otsBox = el('div', 'ots-box')
-  otsBox.hidden = true
-  box.append(otsBox)
-
-  const row = el('div', 'dl-row')
-  const dl = el('button', 'btn btn-primary', '下载') as HTMLButtonElement
-  dl.type = 'button'
-  dl.addEventListener('click', () => download(r.name, r.data))
-  row.append(dl)
-  if (r.ots) {
-    // 包装成标准 DetachedTimestampFile，官方 ots 工具与 opentimestamps.org 可直接验证
-    const b = el('button', 'btn btn-ghost', '下载 ots 文件') as HTMLButtonElement
-    b.type = 'button'
-    b.addEventListener('click', () => download(`${r.name}.ots`, toDetachedOts(r.ots!, r.hash)))
-    row.append(b)
-  }
-  box.append(row)
-  return box
-}
-
-/** 还没凑够片的那一层 */
-/**
- * 还没凑够片的那一层。
- * total 非 null = 密文自己声明了总片数（只有单层密文才有 N 字段），
- * 此时 k > total 是确凿的"永远凑不齐"；否则只能说"还差几片"。
- */
-function lockedRow(level: number, k: number, have: number, total: number | null): HTMLElement {
-  const box = el('div', 'rest-item is-locked')
-  box.append(
-    el('span', 'rest-lv', `第 ${level} 层`),
-    el(
-      'span',
-      'mini-meta',
-      total !== null
-        ? `🔒 需要 ${k} 片，这套密文只拆成 ${total} 片：永远凑不齐`
-        : `🔒 需要 ${k} 片，当前 ${have} 片（还差 ${k - have} 片）`,
-    ),
-  )
-  return box
-}
-
-/** 凑够片、密钥也插出来了，但解不开的那一层：假层 */
-function fakeRow(level: number, k: number): HTMLElement {
-  const box = el('div', 'rest-item is-locked is-fake-layer')
-  box.append(
-    el('span', 'rest-lv', `第 ${level} 层`),
-    el('span', 'mini-meta', `🔒 解密失败 · 假层（${k} 片插出来的密钥对不上）`),
-  )
-  return box
-}
-
-async function renderOtsInto(box: HTMLElement, otsBytes: Uint8Array, actualHash: Uint8Array): Promise<void> {
-  box.hidden = false
-  box.textContent = ''
-  try {
-    const ots = await parseOts(otsBytes, actualHash)
-    const pending = ots.attestations.filter((a) => a.kind === 'pending') as { kind: 'pending'; uri: string; digest: Uint8Array | null }[]
-    const anchors = ots.attestations.filter((a) => a.kind === 'bitcoin') as { kind: 'bitcoin'; height: number; digest: Uint8Array | null }[]
-
-    const spinner = () => {
-      const s = el('span', 'spinner')
-      s.setAttribute('aria-hidden', 'true')
-      return s
-    }
-    const status = el('div', 'ots-line')
-    // 只有白名单里（实测带 CORS 头）的日历才值得发请求；否则请求发出去也读不到响应，
-    // 纯粹白送一次外发。这类回执直接给"本地已校验、可交官方工具复核"的静态结论。
-    const queryable = pending.filter((p) => calendarHasCors(p.uri))
-    const hostOf = (uri: string) => {
-      try {
-        return new URL(uri).hostname
-      } catch {
-        return uri
-      }
-    }
-    if (anchors.length > 0) {
-      status.append(
-        el('span', 'ots-status ok', `OTS 已锚定 Bitcoin 区块 #${anchors.map((a) => a.height).join(' / #')}`),
-        spinner(),
-        el('span', '', '正在比对区块链…'),
-      )
-    } else if (queryable.length > 0) {
-      status.append(
-        el('span', 'ots-status pending', 'OTS 待锚定'),
-        spinner(),
-        el('span', '', '拆分时已提交日历，正在后台查询最新状态…'),
-      )
-    } else if (pending.length > 0) {
-      status.append(
-        el('span', 'ots-status pending', 'OTS 待锚定'),
-        el('span', '', `回执里的日历（${[...new Set(pending.map((p) => hostOf(p.uri)))].join('、')}）不允许浏览器跨域读取，因此没有做在线查询。回执本身已随密文一起存好，可用「下载 ots 文件」交给官方工具（ots verify）复核。`),
-      )
-    } else {
-      status.append(el('span', 'ots-status pending', 'OTS 回执存在，但未识别出 attestation'))
-    }
-    box.append(status)
-
-    // 没有可查的日历就直接收工，一次请求都不发
-    if (pending.length > 0 && queryable.length === 0) {
-      if (ots.degraded) box.append(el('div', 'hint', '回执里有暂不支持的 op/attestation，离线校验只走通了一部分。'))
-      return
-    }
-
-    // 后台查询：完成后原地更新状态行（成功/失败都不打扰用户下载文件）
-    void (async () => {
-      try {
-        let toVerify: { height: number; digest: Uint8Array | null }[] = anchors
-        if (anchors.length === 0) {
-          // 日历升级查询：只查白名单里的（外面已过滤掉不支持 CORS 的）
-          const upgraded = await Promise.all(queryable.map((p) => upgradePending(p)))
-          toVerify = upgraded.flatMap((u) =>
-            u.attestations.filter((a) => a.kind === 'bitcoin'),
-          ) as { kind: 'bitcoin'; height: number; digest: Uint8Array | null }[]
-          if (toVerify.length === 0) {
-            status.textContent = ''
-            status.append(
-              el('span', 'ots-status pending', 'OTS 待锚定'),
-              el('span', '', `已查日历（${queryable.map((p) => p.uri).join('、')}）：尚未上链，比特币锚定通常需 1~3 小时，之后重新恢复本密文可自动再查。`),
-            )
-            return
-          }
-        }
-        const results = await Promise.all(
-          toVerify.map((a) => verifyAnchorOnline({ height: a.height, digest: a.digest })),
-        )
-        const ok = results.some((r) => r.ok)
-        status.textContent = ''
-        status.append(
-          el('span', `ots-status ${ok ? 'ok' : 'pending'}`,
-            ok ? '✓ OTS 存证有效（区块链验证通过）' : '⚠️ OTS 上链但验证未通过，请警惕文件来源'),
-          ...results.map((r) =>
-            el('span', '', `#${r.height} @ ${new Date(r.blockTime).toLocaleString()}：${r.detail}`),
-          ),
-        )
-      } catch (e) {
-        status.textContent = ''
-        const noCors = e instanceof OtsNoCorsError
-        status.append(
-          el('span', 'ots-status pending', noCors
-            ? 'OTS 待锚定（该日历不支持浏览器跨域读取，已跳过在线查询）'
-            : `OTS 待锚定（后台查询失败：${e instanceof Error ? e.message : String(e)}）`),
-          el('span', '', '可点「下载 ots 文件」交给官方工具（ots verify）复核，那条路径不受浏览器跨域限制。'),
-        )
-      }
-    })()
-
-    if (ots.degraded) {
-      box.append(el('div', 'ots-line', el('span', 'ots-status pending', '回执含未识别结构，以上仅部分解析；建议用官方验证器复核。')))
-    }
-  } catch (e) {
-    box.textContent = ''
-    box.append(el('div', 'ots-line', el('span', 'ots-status pending', `OTS 回执解析失败：${e instanceof Error ? e.message : String(e)}`)))
-  }
-}
-

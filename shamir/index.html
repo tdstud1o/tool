@@ -29,7 +29,7 @@
           <span class="badge">k-of-n Shamir</span>
           <span class="badge">零上传</span>
         </div>
-        <button id="themeToggle" class="theme-toggle" title="切换主题" aria-label="切换主题">
+        <button id="themeToggle" class="theme-toggle" type="button" title="切换日夜模式" aria-label="切换日夜模式">
           <svg class="moon" xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
           <svg class="sun" xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
         </button>
@@ -42,8 +42,12 @@
 
       <!-- ============ 拆分 ============ -->
       <section id="view-split" class="view" hidden>
-        <div class="card">
+        <div class="card" id="splitMain">
           <h2>选择文件</h2>
+          <div class="style-row">
+            <span class="style-label">密文外观</span>
+            <div class="seg" id="styleSeg" role="radiogroup" aria-label="密文外观"></div>
+          </div>
           <div id="dropSplit" class="drop" tabindex="0">
             <span id="dropSplitText">拖文件到这里，或点击选择（可多选）</span>
           </div>
@@ -52,6 +56,8 @@
             <input id="nShares" type="number" min="2" max="16777215" value="5" />
           </div>
           <div id="levelList" class="level-list" hidden></div>
+          <!-- 碎片外观：同一块六格拼图当插入界面（往里塞图），层列表让位 -->
+          <div id="fragSplitHost" class="frag-host" hidden></div>
           <div id="levelMore" class="level-more" hidden>
             <div class="add-bar">
               <button id="btnAddMore" class="add-seg add-seg-more" type="button">拖文件到这里，或点击选择（可多选）</button>
@@ -70,6 +76,11 @@
           <details class="adv">
             <summary>高级操作</summary>
             <div class="adv-body">
+              <div class="adv-item" id="ovStyleRow">
+                <div class="adv-label">密文外观覆写</div>
+                <div class="seg seg-sm" id="ovStyleSeg" role="radiogroup" aria-label="密文外观覆写"></div>
+                <div class="hint" id="ovStyleHint"></div>
+              </div>
               <div class="adv-item">
                 <label class="align-opt">
                   <input id="hideNCheck" type="checkbox" />
@@ -142,18 +153,28 @@
 
       <!-- ============ 恢复（先密文，后分片）============ -->
       <section id="view-restore" class="view">
-        <div class="card">
-          <h2>① 选择密文文件</h2>
+        <div class="card" id="restoreMain">
+          <div class="h2-row">
+            <h2>① 选择密文文件</h2>
+            <!-- 恢复端的外观：密文声明的那个是默认值，用户还能手动改（只影响呈现，不影响解密）；
+                 这组一开始就在——先挑呈现方式、再挑密文，也完全合法 -->
+            <div class="seg seg-sm" id="restoreStyleSeg" role="radiogroup" aria-label="呈现外观"></div>
+          </div>
           <div id="dropCt" class="drop" tabindex="0">
             <span id="dropCtText">拖入密文（.tscf）或分片文本（可多选），或点击选择</span>
           </div>
           <div id="ctList" class="mini-list" hidden></div>
 
-          <h2>② 导入分片</h2>
-          <div id="shareMiniList" class="mini-list" hidden></div>
-          <div class="share-add-row">
-            <input id="shareInput" type="text" spellcheck="false" placeholder="输入或粘贴一条分片：TSK1:x:k:y,y,…，回车添加" />
-            <button id="btnAddShare" class="btn btn-ghost" type="button">添加</button>
+          <!-- 密文声明了外观时，外观自己接管恢复界面（碎片：拼图直接摆在这儿） -->
+          <div id="fragHost" class="frag-host" hidden></div>
+
+          <div id="shareBlock">
+            <h2>② 导入分片</h2>
+            <div id="shareMiniList" class="mini-list" hidden></div>
+            <div class="share-add-row">
+              <input id="shareInput" type="text" spellcheck="false" placeholder="输入或粘贴一条分片：TSK1:x:k:y,y,…，回车添加" />
+              <button id="btnAddShare" class="btn btn-ghost" type="button">添加</button>
+            </div>
           </div>
           <div class="import-row">
             <label class="btn btn-ghost file-label">从文件导入分片

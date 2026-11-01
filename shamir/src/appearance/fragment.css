@@ -1,0 +1,516 @@
+/* ===== 密文外观「碎片」：6 块拼满舞台的碎玻璃 =====
+   舞台在亮/暗两种主题下都用深色：它承托的是画面（和看图、看视频用深底
+   是同一种用法），不是页面面板。
+
+   形状是一幅画被切成六块：六块严丝合缝地拼满舞台，缝隙里透出底下的夜空，
+   每块的切线都写在文件末尾的 --poly 里。但**内容互不相干**——每块装的是
+   自己那份密文，谁也拼不出整体，所以别指望把六块拼回一张图。
+   形状共用，内容独立，这就是"碎片"与"拼图"的区别。 */
+.frag-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  margin: 0.2rem 0;
+  border-radius: 14px;
+  overflow: hidden;
+  /* 兜底：真正的底是星空层（.frag-sky），这里只在它还没铺上时挡一下 */
+  background: #04050d;
+  isolation: isolate;
+  /* 图相对自己碎片的溢出量：1 = 恰好盖住包围盒，1.08 = 多出一圈（被切线剪掉）。
+     想更"贴满"调到 1.05~1.12；调到 1 以下就露出玻璃底，不建议。 */
+  --os: 1;
+}
+
+/* ===== 星空 =====
+   碎片浮在夜空里，不是浮在一块灰面板上。所以底就是宇宙本身：
+   星云（几团低饱和的冷色雾）+ 银河斜带 + 三层星点（大小/亮度不同才不假）。
+   全部用渐变画，不用任何图片：整页仍然是自包含、零外发、可离线。
+   这一层在碎片之下，格子里的玻璃是半透明的，所以星星会从玻璃后面透出来。 */
+.frag-sky {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    /* 星云：蓝紫 / 深蓝 / 品红 / 青，都压得很低，只在黑里"若有若无" */
+    radial-gradient(42% 48% at 17% 12%, rgba(96, 80, 218, 0.46), transparent 68%),
+    radial-gradient(34% 42% at 84% 20%, rgba(28, 100, 196, 0.38), transparent 70%),
+    radial-gradient(46% 40% at 72% 90%, rgba(124, 52, 170, 0.34), transparent 72%),
+    radial-gradient(36% 32% at 22% 82%, rgba(20, 116, 158, 0.32), transparent 70%),
+    /* 银河：一道斜着穿过去的淡带，别太亮，否则像塑料膜 */
+    linear-gradient(114deg, transparent 32%, rgba(150, 170, 255, 0.09) 45%, rgba(196, 206, 255, 0.12) 51%, transparent 66%),
+    radial-gradient(120% 100% at 50% 0%, #0d1330 0%, #070a1a 56%, #04050d 100%);
+}
+
+/* 星点：先画一层小星（密、暗），再叠一层亮星（疏、大且带光晕）。
+   写死坐标是刻意的——随机点会让每次渲染都跳一次，静态反而像真的天空。 */
+.frag-sky::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(11px 11px at 67.1% 70.1%, rgba(176, 200, 255, 0.39), transparent 60%),
+    radial-gradient(2.4px 2.6px at 67.1% 70.1%, #fff, transparent 100%),
+    radial-gradient(11px 11px at 95.5% 36.5%, rgba(176, 200, 255, 0.26), transparent 60%),
+    radial-gradient(2.8px 2.6px at 95.5% 36.5%, #fff, transparent 100%),
+    radial-gradient(11px 11px at 95.8% 62.1%, rgba(176, 200, 255, 0.30), transparent 60%),
+    radial-gradient(2.6px 2.7px at 95.8% 62.1%, #fff, transparent 100%),
+    radial-gradient(11px 11px at 65.2% 60.3%, rgba(176, 200, 255, 0.37), transparent 60%),
+    radial-gradient(2.5px 2.4px at 65.2% 60.3%, #fff, transparent 100%),
+    radial-gradient(11px 11px at 31.5% 60.2%, rgba(176, 200, 255, 0.30), transparent 60%),
+    radial-gradient(2.2px 2.6px at 31.5% 60.2%, #fff, transparent 100%),
+    radial-gradient(11px 11px at 34.2% 26.7%, rgba(176, 200, 255, 0.33), transparent 60%),
+    radial-gradient(2.4px 2.8px at 34.2% 26.7%, #fff, transparent 100%),
+    radial-gradient(11px 11px at 43.5% 54.8%, rgba(176, 200, 255, 0.23), transparent 60%),
+    radial-gradient(2.5px 2.7px at 43.5% 54.8%, #fff, transparent 100%),
+    radial-gradient(11px 11px at 53.1% 76.3%, rgba(176, 200, 255, 0.27), transparent 60%),
+    radial-gradient(2.7px 2.7px at 53.1% 76.3%, #fff, transparent 100%),
+    radial-gradient(11px 11px at 2.2% 24.1%, rgba(176, 200, 255, 0.28), transparent 60%),
+    radial-gradient(2.4px 2.6px at 2.2% 24.1%, #fff, transparent 100%),
+    radial-gradient(11px 11px at 44.1% 25.6%, rgba(176, 200, 255, 0.35), transparent 60%),
+    radial-gradient(2.4px 2.8px at 44.1% 25.6%, #fff, transparent 100%),
+    radial-gradient(1.6px 1.6px at 46.9% 12.7%, rgba(215, 242, 255, 0.90), transparent 100%),
+    radial-gradient(1.3px 1.3px at 35.9% 3.8%, rgba(235, 215, 255, 0.79), transparent 100%),
+    radial-gradient(1.3px 1.3px at 6.4% 92.9%, rgba(254, 254, 255, 0.56), transparent 100%),
+    radial-gradient(1.3px 1.3px at 36.9% 75.8%, rgba(248, 239, 255, 0.90), transparent 100%),
+    radial-gradient(1.7px 1.7px at 44.3% 42.3%, rgba(221, 254, 255, 0.79), transparent 100%),
+    radial-gradient(1.9px 1.9px at 52.1% 42.5%, rgba(244, 237, 255, 0.66), transparent 100%),
+    radial-gradient(1.3px 1.3px at 15.9% 24.9%, rgba(251, 226, 255, 0.67), transparent 100%),
+    radial-gradient(1.3px 1.3px at 13.3% 63.2%, rgba(238, 229, 255, 0.75), transparent 100%),
+    radial-gradient(1.4px 1.4px at 86.1% 29.6%, rgba(248, 248, 255, 0.89), transparent 100%),
+    radial-gradient(1.7px 1.7px at 26.8% 95.5%, rgba(224, 222, 255, 0.59), transparent 100%),
+    radial-gradient(1.7px 1.7px at 35.8% 95.4%, rgba(212, 253, 255, 0.69), transparent 100%),
+    radial-gradient(1.5px 1.5px at 74.7% 43.2%, rgba(235, 220, 255, 0.73), transparent 100%),
+    radial-gradient(1.6px 1.6px at 4.4% 54.3%, rgba(251, 215, 255, 0.89), transparent 100%),
+    radial-gradient(1.7px 1.7px at 83.9% 90.5%, rgba(243, 240, 255, 0.66), transparent 100%),
+    radial-gradient(1.5px 1.5px at 53.4% 95.7%, rgba(232, 237, 255, 0.92), transparent 100%),
+    radial-gradient(1.4px 1.4px at 76.4% 54.8%, rgba(227, 228, 255, 0.80), transparent 100%),
+    radial-gradient(1.4px 1.4px at 88.2% 12.7%, rgba(250, 218, 255, 0.92), transparent 100%),
+    radial-gradient(1.8px 1.8px at 85.4% 41.7%, rgba(237, 255, 255, 0.70), transparent 100%),
+    radial-gradient(1.9px 1.9px at 76.8% 72.2%, rgba(255, 250, 255, 0.57), transparent 100%),
+    radial-gradient(1.8px 1.8px at 97.5% 76.4%, rgba(226, 251, 255, 0.93), transparent 100%),
+    radial-gradient(2.0px 2.0px at 72.3% 22.0%, rgba(209, 240, 255, 0.95), transparent 100%),
+    radial-gradient(1.6px 1.6px at 65.3% 47.1%, rgba(213, 239, 255, 0.85), transparent 100%),
+    radial-gradient(1.4px 1.4px at 14.1% 8.5%, rgba(229, 215, 255, 0.59), transparent 100%),
+    radial-gradient(1.3px 1.3px at 25.3% 24.5%, rgba(222, 220, 255, 0.84), transparent 100%),
+    radial-gradient(1.6px 1.6px at 11.9% 69.3%, rgba(227, 218, 255, 0.81), transparent 100%),
+    radial-gradient(1.8px 1.8px at 98.2% 88.4%, rgba(219, 215, 255, 0.65), transparent 100%),
+    radial-gradient(1.3px 1.3px at 23.0% 8.1%, rgba(216, 224, 255, 0.78), transparent 100%),
+    radial-gradient(1.4px 1.4px at 28.0% 78.0%, rgba(251, 224, 255, 0.85), transparent 100%),
+    radial-gradient(1.6px 1.6px at 94.0% 9.7%, rgba(242, 231, 255, 0.90), transparent 100%),
+    radial-gradient(1.9px 1.9px at 56.8% 9.3%, rgba(242, 218, 255, 0.59), transparent 100%),
+    radial-gradient(1.7px 1.7px at 92.4% 25.6%, rgba(238, 253, 255, 0.57), transparent 100%),
+    radial-gradient(1.3px 1.3px at 76.9% 95.6%, rgba(252, 241, 255, 0.87), transparent 100%),
+    radial-gradient(1.7px 1.7px at 14.3% 94.6%, rgba(233, 241, 255, 0.70), transparent 100%),
+    radial-gradient(1.9px 1.9px at 2.9% 36.8%, rgba(243, 219, 255, 0.91), transparent 100%),
+    radial-gradient(1.8px 1.8px at 4.9% 74.5%, rgba(218, 236, 255, 0.63), transparent 100%),
+    radial-gradient(1.6px 1.6px at 42.0% 79.2%, rgba(237, 246, 255, 0.92), transparent 100%),
+    radial-gradient(1.8px 1.8px at 26.5% 61.8%, rgba(207, 236, 255, 0.80), transparent 100%),
+    radial-gradient(1.5px 1.5px at 33.2% 43.3%, rgba(235, 234, 255, 0.87), transparent 100%),
+    radial-gradient(1.8px 1.8px at 3.6% 11.4%, rgba(212, 223, 255, 0.65), transparent 100%),
+    radial-gradient(1.5px 1.5px at 83.5% 71.7%, rgba(218, 251, 255, 0.66), transparent 100%),
+    radial-gradient(1.3px 1.3px at 27.5% 44.5%, rgba(234, 215, 255, 0.81), transparent 100%),
+    radial-gradient(1.7px 1.7px at 83.1% 59.0%, rgba(215, 238, 255, 0.81), transparent 100%),
+    radial-gradient(1.4px 1.4px at 62.0% 23.6%, rgba(207, 216, 255, 0.93), transparent 100%),
+    radial-gradient(1.3px 1.3px at 63.4% 3.4%, rgba(245, 243, 255, 0.65), transparent 100%),
+    radial-gradient(1.4px 1.4px at 63.6% 94.2%, rgba(247, 240, 255, 0.75), transparent 100%),
+    radial-gradient(1.6px 1.6px at 18.2% 45.8%, rgba(211, 251, 255, 0.66), transparent 100%),
+    radial-gradient(1.9px 1.9px at 53.3% 19.7%, rgba(240, 252, 255, 0.76), transparent 100%),
+    radial-gradient(1.3px 1.3px at 46.8% 91.7%, rgba(230, 251, 255, 0.67), transparent 100%),
+    radial-gradient(1.9px 1.9px at 75.4% 4.6%, rgba(234, 233, 255, 0.74), transparent 100%),
+    radial-gradient(1.4px 1.4px at 53.2% 60.9%, rgba(248, 242, 255, 0.84), transparent 100%);
+  opacity: 1;
+}
+
+/* 会呼吸的那几颗：只有三颗大的在慢慢明暗，周期错开，不然整片一起闪就成了灯牌。
+   星星眨眼本来就极慢——6~11 秒一个来回，动得比人注意到的阈值还低。 */
+.frag-sky::after {
+  content: "";
+  position: absolute;
+  inset: -10%;
+  background:
+    radial-gradient(10px 10px at 11% 22%, rgba(198, 216, 255, 0.5), transparent 60%),
+    radial-gradient(2.4px 2.4px at 11% 22%, #fff, transparent 100%),
+    radial-gradient(10px 10px at 79% 15%, rgba(220, 208, 255, 0.45), transparent 60%),
+    radial-gradient(2.4px 2.4px at 79% 15%, #fff, transparent 100%),
+    radial-gradient(9px 9px at 55% 83%, rgba(200, 218, 255, 0.45), transparent 60%),
+    radial-gradient(2.2px 2.2px at 55% 83%, #fff, transparent 100%);
+  animation: frag-twinkle 7.5s ease-in-out infinite alternate;
+}
+@keyframes frag-twinkle {
+  from { opacity: 0.18; }
+  to { opacity: 0.9; }
+}
+
+/* 光晕层：每块碎片背后一片同形状的模糊亮片，只从缝里透出来——
+   夜里的碎玻璃会微微发亮，但光不该盖住画面本身。
+   冷白（接近星光）；暖白在蓝黑底上会显成一条灰。
+   blur 与 clip-path 必须分在两层：同一个元素上 filter 先做、clip 后切，
+   模糊会被切回形状里面，缝里就看不到光了。 */
+.frag-glow {
+  position: absolute;
+  inset: 0;
+  filter: blur(9px);
+  transform: scale(1.02);
+  opacity: 0.13;
+  pointer-events: none;
+}
+.frag-glow::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  clip-path: var(--poly);
+  background: rgba(190, 210, 255, 0.8);
+}
+
+/* 碎片本体只负责形状与命中区（命中区跟着 clip-path 走，点缝不会误触发）。
+   这里不填色：底下的星空要能透上来，填一层深灰就等于把夜空盖住了；
+   亚像素处漏出来的也是星空，同样是底色。 */
+.frag-slot {
+  position: absolute;
+  inset: 0;
+  clip-path: var(--poly);
+  background: transparent;
+}
+/* 磨砂面：深空色的半透明玻璃——冷、比夜空亮一档，隔着它能看见后面的星。
+   面铺满整块碎片，不留内缩：任何 1px 的内缩在星空上都会显成一条灰边。
+   断面高光由 ::after 的内描边画。 */
+.frag-face {
+  position: absolute;
+  inset: 0;
+  clip-path: var(--poly);
+  overflow: hidden;
+  /* 自成一层：颗粒的混合模式只跟这格玻璃里的东西混，不往外串 */
+  isolation: isolate;
+  background:
+    radial-gradient(120% 90% at 22% 8%, rgba(198, 218, 255, 0.07), transparent 62%),
+    linear-gradient(160deg, rgba(22, 29, 54, 0.42), rgba(6, 9, 20, 0.6));
+}
+/* 磨砂颗粒：SVG 噪声，灰度、叠色，只加质感不加色。
+   z 序是刻意的：底片(0) → 主体(2) → 颗粒(3) → 反光(4)。
+   颗粒压在主体之上：玻璃在前、照片在后，磨砂面才会平均地铺满整格，
+   而不是只在主体让开的地方"露出来"。 */
+.frag-face::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='140' height='140' filter='url(%23n)' opacity='0.55'/></svg>");
+  opacity: 0.13;
+  mix-blend-mode: screen;
+  pointer-events: none;
+}
+/* 再压一层边缘光影：左上反光、右下渐暗，玻璃才有厚度（不是贴纸） */
+.frag-face::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background:
+    linear-gradient(112deg, rgba(214, 228, 255, 0.09) 0%, rgba(214, 228, 255, 0.015) 26%, transparent 46%),
+    linear-gradient(155deg, transparent 55%, rgba(0, 0, 0, 0.2)),
+    rgba(200, 220, 255, 0.01);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.13);
+  pointer-events: none;
+}
+/* 每张图只对自己那块碎片的**包围盒**负责（--bx/--by/--bw/--bh）。
+   六块装的是六张不同的照片，它们只是被剪成不规则形状贴在同一片夜空上，
+   谁也不该借用别人的取景框，所以不存在"共用一套坐标"这回事。
+   object-fit: cover 让浏览器自己算缩放：大图缩、小图放大，永远刚好盖住盒子，
+   不用 JS 量 naturalWidth，也不会有"1:1 大图只剩中间一小块"的问题。
+   object-position 用这块碎片的重心（--cx/--cy）：不规则四边形的视觉重点
+   不在盒子正中央，把画面主体对过去，碎片里才有东西。
+   --os 是统一的溢出量（1.0 = 恰好盖住盒子），大出来的那一圈被 --poly 切掉，
+   看着像"照片边缘被剪掉"而不是"照片被塞进相框"。 */
+.frag-img {
+  position: absolute;
+  left: calc(var(--bx, 0%) + var(--bw, 100%) / 2);
+  top: calc(var(--by, 0%) + var(--bh, 100%) / 2);
+  width: calc(var(--bw, 100%) * var(--os, 1));
+  height: calc(var(--bh, 100%) * var(--os, 1));
+  translate: -50% -50%;
+  object-fit: cover;
+  object-position: var(--cx, 50%) var(--cy, 50%);
+  z-index: 2;
+  opacity: 0;
+  transition: opacity 0.5s ease, transform 0.28s ease, filter 0.28s ease;
+}
+.frag-img.is-shown { opacity: 1; }
+/* 图片格的颗粒再轻一点：磨砂是质感，不是给照片蒙一层灰 */
+.frag-slot.is-image .frag-face::before { opacity: 0.12; mix-blend-mode: soft-light; }
+/* 图上不放任何"边框"：内描边、暗角、整面白膜，只要有一条，照片边上就会多出一圈灰。
+   只留左上一道很淡的斜光当玻璃反光，斜光也压到最低——它是铺在照片上的，浓一点就是灰雾。 */
+.frag-slot.is-image .frag-face::after {
+  background: linear-gradient(112deg, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0.02) 22%, transparent 42%);
+  box-shadow: none;
+}
+
+/* hover：只让这一格的画面微微推进一点、亮一点点。
+   轮廓上不画任何亮边——box-shadow 的描边是瞬间出现的（没法从"无"过渡到 1.5px），
+   鼠标刚放上去那一刻就是一条白边；而且它压在照片的断面上，看着像图自带的框。
+   整块也不再放大：放大等于把这一块的断面往外挪，缝里那层白色磨砂光会顺着
+   移开的缝亮起来，同样是一条瞬间的白线。所以只动图片自身（它被裁在碎片里，
+   怎么动都碰不到轮廓）。 */
+.frag-slot.is-image:hover,
+.frag-slot.is-file:hover { z-index: 2; cursor: pointer; }
+.frag-slot.is-image:hover .frag-img { transform: scale(1.02); filter: brightness(1.06) saturate(1.02); }
+.frag-slot.is-file:hover .frag-doc-box { color: #fff; }
+.frag-slot.is-empty,
+.frag-slot.is-locked,
+.frag-slot.is-fake { cursor: default; }
+
+/* 能点/能拖补分片的时候：整块舞台都是投放区，空格子也得看得出来是可以按的 */
+.frag-stage.is-shareable { cursor: pointer; }
+.frag-stage.is-shareable .frag-slot.is-empty,
+.frag-stage.is-shareable .frag-slot.is-locked,
+.frag-stage.is-shareable .frag-slot.is-fake { cursor: pointer; }
+.frag-stage.is-shareable .frag-slot.is-locked .frag-face,
+.frag-stage.is-shareable .frag-slot.is-empty .frag-face { transition: background 0.2s ease; }
+.frag-stage.is-shareable .frag-slot.is-locked:hover .frag-face,
+.frag-stage.is-shareable .frag-slot.is-empty:hover .frag-face {
+  background:
+    radial-gradient(120% 90% at 22% 8%, rgba(210, 226, 255, 0.16), transparent 62%),
+    linear-gradient(160deg, rgba(30, 38, 68, 0.5), rgba(9, 13, 28, 0.66));
+}
+/* 拖着文件悬在拼图上：整块舞台亮一圈，表示"松手就加进来" */
+.frag-stage.is-drop { box-shadow: inset 0 0 0 2px rgba(198, 216, 255, 0.5); }
+.frag-stage.is-drop .frag-slot.is-locked .frag-face,
+.frag-stage.is-drop .frag-slot.is-empty .frag-face {
+  background:
+    radial-gradient(120% 90% at 22% 8%, rgba(214, 230, 255, 0.2), transparent 62%),
+    linear-gradient(160deg, rgba(38, 48, 82, 0.56), rgba(12, 17, 34, 0.7));
+}
+
+/* 还没点亮 / 解不开的格子：同一块玻璃，只是没成像——星空的星星仍然透得上来，
+   只是被压暗、看不太清。区分靠纹路，不靠颜色：空着的最干净，还差片一道斜纹，
+   假层交叉纹。 */
+.frag-slot.is-empty .frag-face,
+.frag-slot.is-locked .frag-face,
+.frag-slot.is-fake .frag-face {
+  background:
+    radial-gradient(120% 90% at 22% 8%, rgba(190, 212, 255, 0.08), transparent 62%),
+    linear-gradient(160deg, rgba(16, 22, 42, 0.34), rgba(4, 7, 16, 0.52));
+}
+.frag-slot.is-locked .frag-face {
+  background:
+    repeating-linear-gradient(135deg, rgba(200, 220, 255, 0.055) 0 1px, transparent 1px 9px),
+    radial-gradient(120% 90% at 22% 8%, rgba(190, 212, 255, 0.08), transparent 62%),
+    linear-gradient(160deg, rgba(16, 22, 42, 0.36), rgba(4, 7, 16, 0.54));
+}
+.frag-slot.is-fake .frag-face {
+  background:
+    repeating-linear-gradient(135deg, rgba(200, 220, 255, 0.05) 0 1px, transparent 1px 9px),
+    repeating-linear-gradient(45deg, rgba(200, 220, 255, 0.05) 0 1px, transparent 1px 9px),
+    linear-gradient(160deg, rgba(15, 20, 38, 0.38), rgba(4, 7, 16, 0.56));
+}
+
+/* 非图片格：文件图标 + 文件名，点一下下载。
+   内容按这块碎片的"重心"(--cx/--cy) 摆，不能用舞台中心：
+   舞台中心通常落在别的碎片上，会被 clip-path 切掉。 */
+.frag-doc-box {
+  position: absolute;
+  left: var(--cx, 50%);
+  top: var(--cy, 50%);
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 66%;
+  color: rgba(226, 232, 255, 0.85);
+  transition: color 0.28s ease;
+}
+.frag-doc { display: flex; }
+.frag-file {
+  max-width: 100%;
+  padding: 0 0.3rem;
+  font-size: 0.66rem;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 格子的标签：编号（圆圈）+ 名字，压在碎片左上角，像图录的注脚。
+   标签是舞台的孩子而不是碎片的：碎片本体带 clip-path，标签挂在里面会被切线切掉一半。
+   每块的位置写在文件末尾（.frag-tag[data-i=n]），不跟着形状走。
+   照片有亮有暗，纯文字的注脚在白底上就糊了，所以给一枚半透明的胶囊底。 */
+.frag-tag {
+  position: absolute;
+  z-index: 3;
+  left: 6%;
+  top: 6%;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 88%;
+  padding: 0.12em 0.62em 0.12em 0.12em;
+  border-radius: 999px;
+  color: #f5f6ff;
+  font-size: clamp(0.58rem, 1.45vw, 0.78rem);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+  background: rgba(9, 11, 19, 0.68);
+  -webkit-backdrop-filter: blur(7px) saturate(0.5);
+  backdrop-filter: blur(7px) saturate(0.5);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+  pointer-events: none;
+}
+.frag-num {
+  flex: 0 0 auto;
+  width: 1.6em;
+  height: 1.6em;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.78);
+  border-radius: 50%;
+  font-size: 0.84em;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.frag-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.frag-tag.is-empty,
+.frag-tag.is-locked,
+.frag-tag.is-fake { opacity: 0.42; }
+
+/* 6 块碎片：一块一块歪着拼，严丝合缝地铺满舞台，缝窄到刚好透光。
+   每块五组值：
+   - --poly：形状（碎片本体 / 面子 / 光晕共用）
+   - --bx/--by/--bw/--bh：这块形状的**包围盒**，也就是它自己那张照片的取景框
+     （必须跟 --poly 的顶点对得上：bx/by 取顶点里最小的 x/y，bw/bh 取跨度）
+   - --cx/--cy：这块碎片的视觉重心，给非图片内容、以及图片取景的 object-position 用
+   刻意让切线不规整：太整齐就又回到"一张图切成六块"的规整感了。 */
+.frag-stage [data-i="1"] {
+  --poly: polygon(0% 0%, 33% 0%, 30% 13%, 34% 44%, 0% 38%);
+  --bx: 0%; --by: 0%; --bw: 34%; --bh: 44%; --cx: 16%; --cy: 19%;
+}
+.frag-stage [data-i="2"] {
+  --poly: polygon(35% 0%, 68% 0%, 65% 22%, 66% 47%, 36% 46%, 32% 13%);
+  --bx: 32%; --by: 0%; --bw: 36%; --bh: 47%; --cx: 51%; --cy: 22%;
+}
+.frag-stage [data-i="3"] {
+  --poly: polygon(70% 0%, 100% 0%, 100% 47%, 87% 48%, 72% 50%, 68% 20%);
+  --bx: 68%; --by: 0%; --bw: 32%; --bh: 50%; --cx: 85%; --cy: 25%;
+}
+.frag-stage [data-i="4"] {
+  --poly: polygon(76% 53%, 88% 51%, 100% 50%, 100% 100%, 75% 100%);
+  --bx: 75%; --by: 50%; --bw: 25%; --bh: 50%; --cx: 88%; --cy: 76%;
+}
+.frag-stage [data-i="5"] {
+  --poly: polygon(70% 48%, 67% 72%, 71% 100%, 43% 100%, 41% 49%);
+  --bx: 41%; --by: 48%; --bw: 30%; --bh: 52%; --cx: 57%; --cy: 76%;
+}
+.frag-stage [data-i="6"] {
+  --poly: polygon(0% 40%, 18% 43%, 36% 47%, 39% 100%, 0% 100%);
+  --bx: 0%; --by: 40%; --bw: 39%; --bh: 60%; --cx: 18%; --cy: 72%;
+}
+
+.frag-tag[data-i="1"] { left: 2.5%; top: 3.5%; }
+.frag-tag[data-i="2"] { left: 38%; top: 3%; }
+.frag-tag[data-i="3"] { left: 72%; top: 3%; }
+.frag-tag[data-i="4"] { left: 78%; top: 56%; max-width: 21%; }
+.frag-tag[data-i="5"] { left: 44%; top: 56%; }
+.frag-tag[data-i="6"] { left: 2%; top: 44%; }
+
+/* 点亮时淡入：先摆空舞台，恢复过程里一块一块亮起来 */
+.frag-slot.is-image,
+.frag-slot.is-file { animation: frag-in 0.5s ease backwards; }
+.frag-slot[data-i="3"] { animation-delay: 0.04s; }
+.frag-slot[data-i="4"] { animation-delay: 0.08s; }
+.frag-slot[data-i="5"] { animation-delay: 0.12s; }
+.frag-slot[data-i="6"] { animation-delay: 0.16s; }
+@keyframes frag-in {
+  from { opacity: 0.15; transform: scale(0.94); }
+  to { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .frag-img { transition: opacity 0.5s ease; }
+  .frag-slot.is-image:hover .frag-img { transform: none; }
+  .frag-slot.is-image, .frag-slot.is-file { animation: none; }
+  /* 星星不呼吸，但保持"最亮"那一档，静态也不至于太暗 */
+  .frag-sky::after { animation: none; opacity: 0.9; }
+}
+
+/* 碎片外观下，校验信息收进折叠框（拼图是主角，哈希不是） */
+.frag-details {
+  margin: 0.9rem 0 0;
+  padding: 0 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--entry);
+}
+.frag-details > summary {
+  padding: 0.6rem 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.frag-details .rest-item { margin: 0 0 0.7rem; }
+.frag-details .rest-item:last-child { margin-bottom: 0.9rem; }
+
+/* ===== 拆分端：同一块拼图，往里塞图 =====
+   恢复端是"凑够片亮一块"，拆分端是"先把要藏的东西摆进六块"。
+   形状/命中区/悬停反馈全部复用上面那套，这里只加"空格子长什么样"和撤回按钮。
+   空格子的加号摆在这块碎片的重心（--cx/--cy）上，摆舞台中心会被切线切掉。 */
+.frag-add {
+  position: absolute;
+  left: var(--cx, 50%);
+  top: var(--cy, 50%);
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.34rem;
+  color: rgba(226, 232, 255, 0.5);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  pointer-events: none;
+  transition: color 0.2s ease;
+}
+.frag-add-plus {
+  width: 1.8rem;
+  height: 1.8rem;
+  display: grid;
+  place-items: center;
+  border: 1px dashed rgba(255, 255, 255, 0.32);
+  border-radius: 50%;
+  font-size: 1rem;
+  line-height: 1;
+  transition: border-color 0.2s ease;
+}
+.frag-split .frag-slot.is-empty:hover .frag-add { color: #fff; }
+.frag-split .frag-slot.is-empty:hover .frag-add-plus { border-color: rgba(255, 255, 255, 0.62); }
+/* 已放好的格子点了没有动作（下载是恢复端的事），指针就别装成小手；
+   要撤掉这一层，用格子右上角那颗 × */
+.frag-split .frag-slot.is-image:hover,
+.frag-split .frag-slot.is-file:hover { cursor: default; }
+
+/* 标签只写「编号 + 名字 + ×」；k 由位置决定，不再单独占一行 */
+.frag-split .frag-tag { max-width: 88%; }
+.frag-x {
+  pointer-events: auto;
+  margin-left: 0.3em;
+  width: 1.25em;
+  height: 1.25em;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-size: 0.86em;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+.frag-x:hover { background: rgba(255, 92, 92, 0.9); }
+.frag-split-note { margin: 0.55rem 0 0; }

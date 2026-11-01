@@ -57,12 +57,13 @@ export function tlvParse(magic: string, b: Uint8Array): TlvFile {
 }
 
 // ===== 外层：TSCF 密文容器 =====
-// 外层 tag 编号 = 物理布局顺序（顺序读取无需跳转）：K → N → IV → CIPHERTEXT
+// 外层 tag 编号 = 物理布局顺序（顺序读取无需跳转）：K → N → IV → CIPHERTEXT → STYLE
 //
 // TLV tag 注册表（语义编号，一旦发布冻结，禁止改义/回收复用；加新字段挑空号）
 //   TSCF: 0x01 FILENAME（已废止：v1.2 起不再写入，解析时视为未知 tag 跳过）
 //         | 0x02 K（必需）| 0x03 N（可选：仅单层密文写入，多层链一律不写）
-//         | 0x04 IV | 0x05 CIPHERTEXT | 0x06-0xFF 空闲
+//         | 0x04 IV | 0x05 CIPHERTEXT | 0x06 STYLE（1B 外观编号，可选，缺失=默认）
+//         | 0x07-0xFF 空闲
 //   TSPK: 0x01 FILENAME（可选）| 0x04 CREATED_AT（可选）| 0x05 MIME（可选）| 0x06 NOTE（预留未用）
 //         | 0x07 SHA256 | 0x08 ALGO（1B：0=不压缩, 1=zstd L3, 2=gzip 原生, 3=zstd L19；缺失=0）
 //         | 0x11 DATA（ALGO≠0 时为压缩字节流）| 0x12 OTS_RECEIPT
@@ -84,6 +85,11 @@ export const TSCF = {
     N: 0x03, // 4B 大端总片数；只写在单层密文上（多层链不写，恢复端也就无从得知 n）
     IV: 0x04, // 12B
     CIPHERTEXT: 0x05, // AES-256-GCM(key, TSPK 包)
+    // 外观（style）：1B 编号，只写最外层（用户实际拿到的那一个文件）。
+    // 它天生是明文——"这密文长什么样"必须是可读的，否则恢复端无从渲染。
+    // 因为编号排在 CIPHERTEXT 之后，物理上落在末块；解析器本来就顺序扫全量，
+    // 不会为了它多跳一次。旧解析器当作未知 tag 跳过，不影响解密。
+    STYLE: 0x06,
   },
 } as const
 
