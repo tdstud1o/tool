@@ -96,8 +96,6 @@ interface ShardGeom {
   /** 标签锚点：最上面那个顶点往重心方向缩一点，落在玻璃上而不是悬崖边 */
   lx: number
   ly: number
-  /** 靠右的块改成右对齐，否则标签会被舞台的 overflow 裁掉半截 */
-  right: boolean
 }
 
 const GEOM: readonly ShardGeom[] = SHARDS.map((pts) => {
@@ -122,7 +120,6 @@ const GEOM: readonly ShardGeom[] = SHARDS.map((pts) => {
     // 夹进画框：出血块的顶点在舞台外，照原样摆标签会被裁掉
     lx: round1(Math.min(96, Math.max(2, top[0] + (cx - top[0]) * 0.22))),
     ly: round1(Math.min(94, Math.max(2, top[1] + (cy - top[1]) * 0.22))),
-    right: top[0] + (cx - top[0]) * 0.22 > 56,
   }
 })
 
@@ -429,6 +426,59 @@ function setSlotState(slot: HTMLElement, cls: string): void {
   if (g) g.dataset.state = cls.replace('frag-slot is-', '')
 }
 
+// ===== 标签的浮出 =====
+//
+// 名字默认是收起的（CSS 里 .frag-tag 只剩一枚编号）。六块挤在一起，名字又是
+// "v2-c30a9fdb134...1440w" 这种长度，一直摊开必然互相压——所以谁被指到，谁才长出来。
+//
+// 计时器**按标签各记一个**：光标从 A 块挪到 B 块，A 的收起排了队、B 的浮出立刻发生，
+// 共用一个计时器的话 B 那一句会把 A 的收起取消掉，两个标签就同时长出来了。
+// 为什么要排队而不是立刻收：光标从玻璃挪到它自己的标签上时会先 leave 再 enter，
+// 不留这点缓冲，名字会在两道事件之间闪一下。
+const peekTimers = new WeakMap<HTMLElement, number>()
+
+function peek(tag: HTMLElement, on: boolean): void {
+  const pending = peekTimers.get(tag)
+  if (pending !== undefined) {
+    window.clearTimeout(pending)
+    peekTimers.delete(tag)
+  }
+  if (on) {
+    tag.classList.add('is-peek')
+    return
+  }
+  peekTimers.set(
+    tag,
+    window.setTimeout(() => {
+      tag.classList.remove('is-peek')
+      peekTimers.delete(tag)
+    }, 130),
+  )
+}
+
+/**
+ * 换文案/换状态时重写 className 会连带冲掉 `is-peek`——鼠标还停在那块上，
+ * 名字却缩回去了。所以一律走这里。
+ */
+function setTagClass(tag: HTMLElement, cls: string): void {
+  tag.className = tag.classList.contains('is-peek') ? `${cls} is-peek` : cls
+}
+
+/**
+ * 让一格和它的标签连起来：指针落在玻璃上（或落在标签自己身上）→ 名字长出来。
+ * 键盘走 focus / blur——Tab 到一格上同样该看见它叫什么。
+ */
+function bindPeek(slot: HTMLElement, tag: HTMLElement): void {
+  const show = (): void => peek(tag, true)
+  const hide = (): void => peek(tag, false)
+  slot.addEventListener('pointerenter', show)
+  slot.addEventListener('pointerleave', hide)
+  slot.addEventListener('focus', show)
+  slot.addEventListener('blur', hide)
+  tag.addEventListener('pointerenter', show)
+  tag.addEventListener('pointerleave', hide)
+}
+
 /**
  * 六块舞台的骨架：星空层 + 六个碎片 + 边缘高光 + 六个标签。
  * 恢复端（往外取图）和拆分端（往里塞图）**共用这一份**——所谓"同一套组件"，
@@ -481,17 +531,31 @@ function buildStage(): { stage: HTMLElement; slots: Map<number, HTMLElement>; ta
     // 一上来就写"未解锁"会像"已经有东西、只是没凑够片"。
     const tag = el('div', 'frag-tag is-empty')
     tag.dataset.i = String(i)
-    // 右半边的块从右往左长，长名字不会顶出舞台
-    if (g.right) {
+    // 标签从锚点往哪边长：**按哪一侧装得下来定，不是按这块在左半还是右半定**。
+    // 块 1 的上顶点偏到 33%，锚点落在 29.6%——向右只剩 9%（不到 80px），
+    // 名字会横过缝去盖住第 2 块的编号；向左却有 29.6%，足够铺开。
+    // 量两侧的时候还要把纸边算进去：出血块的包围盒是负的，能用的只到 0。
+    const roomRight = Math.min(g.bx + g.bw, 100) - g.lx
+    const roomLeft = g.lx - Math.max(g.bx, 0)
+    const leftward = roomLeft > roomRight
+    // 往哪边长记在 dataset 上，不能塞进 className：换状态时 setTagClass 会把 className 整个重写。
+    // CSS 靠 [data-side="left"] 把行内顺序反过来，让编号钉死在锚点上——
+    // 否则标签一展开，编号就顺着宽度滑走，看着像整枚角标在跑。
+    tag.dataset.side = leftward ? 'left' : 'right'
+    if (leftward) {
       tag.style.left = 'auto'
       tag.style.right = `${round1(100 - g.lx)}%`
     } else {
       tag.style.left = `${g.lx}%`
     }
     tag.style.top = `${g.ly}%`
+    // 名字的宽度上限只取这一侧的可用空间：超出这块玻璃的标签会压到隔壁的编号上，
+    // 那正是"文件名重叠"的观感。展开只在 hover 时发生，但压在别人头上依然难看。
+    tag.style.maxWidth = `${round1(Math.max(leftward ? roomLeft : roomRight, 10) * 0.98)}%`
     tag.append(el('span', 'frag-num', String(i)), el('span', 'frag-name', '空着'))
     stage.append(tag)
     tags.set(i, tag)
+    bindPeek(slots.get(i)!, tag)
   }
   return { stage, slots, tags }
 }
@@ -509,6 +573,8 @@ export function createFragmentView(): RestoreView {
   stage.addEventListener('click', (e) => {
     const hit = (e.target as HTMLElement).closest('.frag-slot')
     if (hit && (hit.classList.contains('is-image') || hit.classList.contains('is-file'))) return
+    // 点在标签上是"想看看这块叫什么"，它悬在玻璃块外面，不该被当成"点了夜空 = 补片"
+    if ((e.target as HTMLElement).closest('.frag-tag')) return
     if (!canAdd()) return
     intent!.pick()
   })
@@ -551,7 +617,7 @@ export function createFragmentView(): RestoreView {
   const setTag = (i: number, text: string, kind: string): void => {
     const tag = tags.get(i)
     if (!tag) return
-    tag.className = `frag-tag ${kind}`
+    setTagClass(tag, `frag-tag ${kind}`)
     ;(tag.querySelector('.frag-name') as HTMLElement).textContent = text
   }
 
@@ -675,7 +741,7 @@ export function createFragmentSplitView(): SplitView {
     face.textContent = ''
     face.append(el('div', 'frag-add', el('div', 'frag-add-plus', '+'), el('div', 'frag-add-text', '放图')))
     const tag = tagOf(i)
-    tag.className = 'frag-tag is-empty'
+    setTagClass(tag, 'frag-tag is-empty')
     tag.textContent = ''
     tag.append(el('span', 'frag-num', String(i)), el('span', 'frag-name', '空着'))
   }
@@ -698,7 +764,7 @@ export function createFragmentSplitView(): SplitView {
     if (c.fake) {
       setSlotState(slot, 'frag-slot is-fake')
       slot.title = `第 ${i} 层是假文件层：凑够 ${c.k} 片也解不开`
-      tag.className = 'frag-tag is-fake'
+      setTagClass(tag, 'frag-tag is-fake')
       face.append(el('div', 'frag-doc-box', fileGlyph(), el('div', 'frag-file', '假文件层')))
       tag.append(el('span', 'frag-name', '假文件层'), remove)
       return
@@ -708,7 +774,7 @@ export function createFragmentSplitView(): SplitView {
     const image = file !== null && isImageFileLike(file.name, file.type)
     setSlotState(slot, `frag-slot ${image ? 'is-image' : 'is-file'}`)
     slot.title = `${c.name} · ${fmtSize(c.size)} · 第 ${i} 层，需要 ${c.k} 片`
-    tag.className = `frag-tag ${image ? 'is-image' : 'is-file'}`
+    setTagClass(tag, `frag-tag ${image ? 'is-image' : 'is-file'}`)
     if (image && file) {
       const url = URL.createObjectURL(file)
       urls.push(url)
@@ -739,6 +805,7 @@ export function createFragmentSplitView(): SplitView {
     }
     const hit = (e.target as HTMLElement).closest('.frag-slot')
     if (hit && !hit.classList.contains('is-empty')) return
+    if ((e.target as HTMLElement).closest('.frag-tag')) return
     if (!canAdd()) return
     intent!.pick()
   })

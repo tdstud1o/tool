@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="图格 Tessera">
+  <defs>
+    <linearGradient id="g" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#7aa6ff" />
+      <stop offset="1" stop-color="#9a5cf5" />
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="29" fill="#101319" />
+  <rect x="1" y="1" width="126" height="126" rx="28" fill="none" stroke="#ffffff" stroke-opacity="0.1" stroke-width="2" />
+  <!-- 三片已归位 -->
+  <g fill="url(#g)">
+    <rect x="22" y="22" width="38" height="38" rx="8" />
+    <rect x="68" y="22" width="38" height="38" rx="8" />
+    <rect x="22" y="68" width="38" height="38" rx="8" />
+  </g>
+  <!-- 第四片的位置：空着，等它回来 -->
+  <rect x="70" y="70" width="34" height="34" rx="7" fill="none"
+        stroke="#ffffff" stroke-opacity="0.34" stroke-width="3" />
+</svg>

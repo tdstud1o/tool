@@ -363,9 +363,13 @@
   top: 6%;
   display: flex;
   align-items: center;
-  gap: 0.35rem;
-  max-width: 88%;
-  padding: 0.12em 0.62em 0.12em 0.12em;
+  /* 折叠时 gap 也是 0：整个标签收缩成一枚圆形编号 */
+  gap: 0;
+  /* 兜底值；实际上限由 fragment.ts 写 inline style。
+     `max-width` 的百分比是相对**舞台**算的——早先这里写 88%，窄块上的
+     "v2-c30a9fdb134...1440w" 会一路横跨大半个舞台、压到隔壁块的标签上。 */
+  max-width: 26%;
+  padding: 0.12em;
   border-radius: 999px;
   color: #f5f6ff;
   font-size: clamp(0.58rem, 1.45vw, 0.78rem);
@@ -375,7 +379,23 @@
   backdrop-filter: blur(7px) saturate(0.5);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
   pointer-events: none;
+  transition: gap 0.24s ease, padding 0.24s ease;
 }
+/* 名字只在指针落在这块玻璃上时才浮出来（.is-peek 由 fragment.ts 挂）。
+   六块挤在一起、名字又是 "v2-c30a9fdb...1440w" 这种长度，一直摊着必然打架；
+   平时一颗编号已经够定位，要认哪一张，指过去就行。 */
+.frag-tag.is-peek {
+  gap: 0.35rem;
+  padding: 0.12em 0.62em 0.12em 0.12em;
+  pointer-events: auto;
+}
+/* 编号钉在锚点上：锚点靠右、名字要往左长的块（data-side="left"），
+   行内顺序整个反过来，编号才会稳稳待在原地，而不是被撑开的宽度推着走。
+   反过来之后 × 会排到最外头，离编号老远——给它让个位，读起来还是
+   「名字 × ①」，删除键紧挨着它所属的那一层。 */
+.frag-tag[data-side="left"] { flex-direction: row-reverse; }
+.frag-tag[data-side="left"] .frag-name { order: 1; }
+.frag-tag[data-side="left"].is-peek { padding: 0.12em 0.12em 0.12em 0.62em; }
 .frag-num {
   flex: 0 0 auto;
   width: 1.6em;
@@ -389,11 +409,21 @@
   font-variant-numeric: tabular-nums;
 }
 .frag-name {
+  /* 折叠到 0 宽 + 全透明：展开时是"从编号里长出来"的，不是一个突然出现的块 */
   min-width: 0;
+  max-width: 0;
+  opacity: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   letter-spacing: 0.02em;
+  transition: max-width 0.28s cubic-bezier(0.22, 0.7, 0.28, 1), opacity 0.16s ease;
+}
+.frag-tag.is-peek .frag-name {
+  /* 260px 只是个"足够长"的锚点：tag 自己的 max-width（这块的宽度）会先把它压回来，
+     压不住的部分交给上面的 ellipsis */
+  max-width: 260px;
+  opacity: 1;
 }
 .frag-tag.is-empty,
 .frag-tag.is-locked,
@@ -402,8 +432,11 @@
 /* 窄屏只留编号：舞台被压到 340px 宽时，六个胶囊标签会互相压住。
    参考图里的角标本来也就是一个圆形编号，名字在恢复端可以点开格子看（下载也靠它）。 */
 @media (max-width: 560px) {
-  .frag-tag { padding: 0.12em; }
+  .frag-tag { padding: 0.12em 0.5em 0.12em 0.12em; }
   .frag-tag .frag-name { display: none; }
+  /* 触摸屏没有 hover，× 不能跟着名字一起藏起来，否则撤不掉层。
+     这条 media 写在 .frag-x 折叠规则之前，得靠 .frag-stage 前缀把权重提上去。 */
+  .frag-stage .frag-tag:not(.is-peek) .frag-x { width: 1.25em; margin-left: 0.3em; opacity: 1; }
 }
 
 /* 点亮时淡入：先摆空舞台，恢复过程里一块一块亮起来 */
@@ -469,21 +502,20 @@
   height: 1.8rem;
   display: grid;
   place-items: center;
-  border: 1px dashed rgba(255, 255, 255, 0.32);
-  border-radius: 50%;
-  font-size: 1rem;
+  /* 不画虚线圈：一圈虚线在夜空上读起来像"占位框"，而这个加号本来只要说明
+     "这里能放一张"——六个虚线圈排在一起，画面就成了六张空表格。 */
+  font-size: 1.15rem;
   line-height: 1;
-  transition: border-color 0.2s ease;
+  transition: color 0.2s ease;
 }
 .frag-split .frag-slot.is-empty:hover .frag-add { color: #fff; }
-.frag-split .frag-slot.is-empty:hover .frag-add-plus { border-color: rgba(255, 255, 255, 0.62); }
 /* 已放好的格子点了没有动作（下载是恢复端的事），指针就别装成小手；
    要撤掉这一层，用格子右上角那颗 × */
 .frag-split .frag-slot.is-image:hover,
 .frag-split .frag-slot.is-file:hover { cursor: default; }
 
-/* 标签只写「编号 + 名字 + ×」；k 由位置决定，不再单独占一行 */
-.frag-split .frag-tag { max-width: 88%; }
+/* 标签只写「编号 + 名字 + ×」；k 由位置决定，不再单独占一行。
+   宽度上限由 fragment.ts 按块写 inline style，这里不再兜一道舞台百分比。 */
 .frag-x {
   pointer-events: auto;
   margin-left: 0.3em;
@@ -499,7 +531,15 @@
   font-size: 0.86em;
   line-height: 1;
   cursor: pointer;
-  transition: background 0.18s ease;
+  overflow: hidden;
+  transition: background 0.18s ease, width 0.24s ease, margin-left 0.24s ease, opacity 0.16s ease;
+}
+/* 折叠态的标签只有一个编号，× 跟着收进去——不然一颗小胶囊上挂着个删除键，
+   看着像"这块可以删"而不是"这块是第几层"。指针上来才露出来。 */
+.frag-tag:not(.is-peek) .frag-x {
+  width: 0;
+  margin-left: 0;
+  opacity: 0;
 }
 .frag-x:hover { background: rgba(255, 92, 92, 0.9); }
 .frag-split-note { margin: 0.55rem 0 0; }

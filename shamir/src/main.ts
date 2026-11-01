@@ -13,7 +13,7 @@ import {
   type ShareEntry,
 } from './core/format.ts'
 import { fakeK, padKs, randSize, sizeStats, type LevelPlan } from './core/levels.ts'
-import { FRAGMENT_SLOTS, STYLE, STYLE_LIST, readStyle, styleBytes, styleLabel, type StyleId } from './core/styles.ts'
+import { STYLE, STYLE_LIST, readStyle, styleBytes, styleLabel, type StyleId } from './core/styles.ts'
 import {
   OtsNoCorsError,
   calendarHasCors,
@@ -32,6 +32,16 @@ import type { RestoreView, ShareIntent, SplitCell, SplitView } from './appearanc
 
 /** 拆分结果里最多渲染多少行分片；超出部分折叠（n 可达十万级） */
 const SHARE_ROWS = 50
+
+/**
+ * 恢复端**唯一**的筛选器：密文 `.tscf` 与分片文本一起选。
+ *
+ * 恢复端只有一只文件输入框（`fileCtInput`，挂在 #dropCt 上），① 点击、星图/玻璃点格子
+ * 都打开它，所以筛选器只有这一份，不存在"两个入口两套规则"的可能。
+ * 筛选器只是给系统文件框的提示，真正的分辨在 `ingestFiles` 里（TSCF 魔数 / TSK1 头）。
+ * 别放宽成 `''` 或加 `image/*`：那会让照片混进密文选择框（2026-11-01 用户明确否掉）。
+ */
+const RESTORE_ACCEPT = '.tscf,.txt,.share,.shares,text/plain'
 
 // ===== 工具 =====
 
@@ -1099,9 +1109,12 @@ $<HTMLButtonElement>('btnSplit').addEventListener('click', async () => {
     if (mulmods > 2e7) run.line(`⚠️ 计算量偏大，可能要几十秒到几分钟，页面可以继续滚动`, 'lg-warn')
     if (emit !== style)
       run.line(`外观覆写：密文记成「${styleLabel(emit)}」，插入仍是普通模式`)
-    if (ownsStage(emit) && chain > FRAGMENT_SLOTS)
+    // 自带界面的外观各有各的格数上限（碎片 6 格；星座不设限，路会往下长），
+    // 所以这里不能写死，得问那个外观自己要多少
+    const emitCap = splitPolicy(emit).maxLayers
+    if (Number.isFinite(emitCap) && chain > emitCap)
       run.line(
-        `⚠️ 覆写成「${styleLabel(emit)}」外观，但恢复端只有 ${FRAGMENT_SLOTS} 格：第 ${FRAGMENT_SLOTS + 1} 层起不会出现在那六格上，只能在「文件信息与校验」里看`,
+        `⚠️ 覆写成「${styleLabel(emit)}」外观，但恢复端只有 ${emitCap} 格：第 ${emitCap + 1} 层起不会出现在那些格子上，只能在「文件信息与校验」里看`,
         'lg-warn',
       )
 
@@ -1653,6 +1666,8 @@ function refreshRestoreBtn(): void {
 }
 
 const fileCtInput = bindDrop([$<HTMLElement>('dropCt')], true, (files) => void ingestFiles(files))
+// ① 的输入框就是恢复端唯一的选择器：星图点格子/点纸面也打开它，筛选器自然同一份
+fileCtInput.accept = RESTORE_ACCEPT
 
 // ===== 恢复界面：外观接管 =====
 //
@@ -1662,16 +1677,14 @@ const fileCtInput = bindDrop([$<HTMLElement>('dropCt')], true, (files) => void i
 
 /** 外观要补充分片时的两个动作：交给主流程才认识密文与分片格式 */
 const shareIntent: ShareIntent = {
+  // 复用 ① 的那个 input，而不是另一只「补片专用」的：
+  // 两个入口两套 accept 正是筛选器打架的根源（一个漏 .tscf、一个什么都能选）。
   pick: () => {
-    const inp = $<HTMLInputElement>('shareFiles')
-    // 碎片界面是个"什么都能往里放"的入口：还没有密文时连类型都不限，
-    // .tscf 和分片文本一起选（ingestFiles 自己按魔数 / TSK1 头分辨）。
-    inp.accept = activeCt ? '.txt,.share,.shares,text/plain' : ''
-    inp.click()
+    if (!fileCtInput.disabled) fileCtInput.click()
   },
   drop: (files) => void ingestFiles(files),
   // 恢复跑着的时候控件全禁用（Run 里那一套），这里跟着它走
-  allowed: () => !$<HTMLInputElement>('shareFiles').disabled,
+  allowed: () => !fileCtInput.disabled,
 }
 
 /** 视图挂在哪儿：碎片摆进 ① 卡（② 那块消失），其余外观仍用下面的结果卡 */

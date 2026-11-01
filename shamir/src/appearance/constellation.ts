@@ -1,328 +1,412 @@
-// 外观「星座」：六个星座排在一张琥珀色的旧星图上。
+// 外观「星座」：一张琥珀色的古代星图，星星自上而下连成一条「星光之路」。
 //
-// 一层 = 一个星座。凑够这一层要求的几片，那个星座的连线才连得起来、
-// 星云里才透出那张照片。没凑齐的星座只剩几个暗星点——「还没被观测到」。
+// 一层 = 一颗星。放/解开一层，那颗星就从虚变实；两颗之间那段路，也才跟着亮起来。
+// 所以这条路的长度就是"已经走到第几层"，不是装饰。
 //
-// 与碎片的分工一样：形状（星点、连线、位置）全在本文件里算，CSS 只管材质。
-// 不同的是碎片是「一块玻璃 = 一层」，这里「一个星座 = 一层」，星图本身不切块：
-// 六块之间的空隙是天空，不是玻璃的缝。
+// **颗数不封顶**：一开始先摆六颗虚星等你填，六颗都实了，第七颗才在下面长出来——
+// 路是往下延伸的，不是走到第六颗就到头。星图的高度因此跟着行数走（CSS 的
+// `--rows`），而落脚点的纵向百分比始终按 `(i+0.5)/rows` 算：两者一乘，每颗星
+// 之间的像素距离是常数，往下的星越长越远，前面的星却一步也不动。
+//
+// 与碎片的分工一样：几何（星位、曲线、路上的光点）全在本文件里算，CSS 只管材质。
+// 不一样的是这里不切块——星图是一整张纸，星与星之间是路，不是缝。
 
 import './constellation.css'
-import { isImageFileLike, sniffImageMime, STAGE_SLOTS } from '../core/styles.ts'
+import { isImageFileLike, sniffImageMime } from '../core/styles.ts'
 import { baseName, download, el, fmtSize, trackUrl } from '../ui/dom.ts'
 import { levelCard, otsHost } from './card.ts'
 import type { LayerInfo, RestoreView, ShareIntent, SplitCell, SplitIntent, SplitPolicy, SplitView } from './types.ts'
 
 const NS = 'http://www.w3.org/2000/svg'
-const SLOTS = STAGE_SLOTS
 
-/** 拆分端规矩：只收图片，最多 6 层（假层也占一格） */
+/** 一开始就摆六颗虚星：还没放东西时，这张图也得看起来是一条要走的路 */
+const MIN_ROWS = 6
+
+/**
+ * 拆分端规矩：**任意文件**，层数不设上限（一颗星 = 一层，路一直往下载）。
+ *
+ * 星图不是画廊——一颗星只是"这一层放在哪儿"的记号，它收什么内容与外观无关。
+ * 图片会在悬停时浮出来（见下），其余格式落成一张档案卡，名字照样写在星下面。
+ */
 export const CONSTELLATION_SPLIT: SplitPolicy = {
-  accept: 'image/*',
-  acceptLabel: '图片',
-  maxLayers: SLOTS,
-  accepts: (f) => isImageFileLike(f.name, f.type),
-  dropText: '把照片拖到星图上，或点击选择（可多选）',
+  accept: '',
+  acceptLabel: '任意文件',
+  maxLayers: Number.POSITIVE_INFINITY,
+  accepts: () => true,
+  dropText: '把文件拖到星图上，或点击选择（可多选）',
 }
 
-// ===== 六个星座 =====
-//
-// 星点是 0..1 的归一化坐标（对**自己那一格**而言），连线是星点下标对。
-// 形状按真实星座摆的近似图（不必天文精确，要的是「一眼认得出是个星座」）：
-// 白羊的折线、金牛的 V 与两只角、双子的两条腿、狮子的镰刀、处女的 Y、
-// 天蝎那条长长的尾巴。由简到繁，正好对上 k = 1..6 的递增。
-//
-// box 是这一格在舞台上的位置与大小（%）：六格排成 3 列 2 行，但不严格对齐——
-// 星图上的星座本来就各占各的角落，横平竖直反而像表格。
+type Pt = readonly [number, number]
 
-interface Sign {
-  cn: string
-  en: string
-  /** 星云尺寸（相对自己这一格）与偏移（%）：六个一般大就成了六个气泡 */
-  cloud: readonly [number, number, number]
-  /** 星点：坐标 0..1，r 是直径（屏幕 px，舞台宽度 800 左右时的观感基准） */
-  stars: readonly { x: number; y: number; r: number }[]
-  /** 连线：星点下标对 */
-  lines: readonly (readonly [number, number])[]
-  /** x, y, w, h（舞台百分比） */
-  box: readonly [number, number, number, number]
+/**
+ * 横向摆位（舞台百分比），一圈用完再轮回。
+ *
+ * 一路直下会读成刻度尺，所以绕弯：先向右送出去，到 3 号折回左边，再往右下走。
+ * **只有一条线、不分叉**——分叉的路线一眼读成"地图"，单线的才像天蝎那条尾巴：
+ * 沿着走，一颗接一颗。前六个是调过的，后六个把幅度接着摆开，不至于看着像
+ * "六颗一组重复"。
+ */
+const X_SEQ: readonly number[] = [26, 55, 66, 44, 27, 50, 62, 35, 30, 58, 68, 45]
+
+/** 每颗星的"星等"（核心直径的基准，px）：大小错开才像星空，不像一排灯泡 */
+const MAGNITUDE_SEQ: readonly number[] = [3.0, 3.6, 3.3, 4.0, 3.4, 3.7]
+
+const xAt = (i: number): number => X_SEQ[i % X_SEQ.length]!
+/** 纵向：行数越多，每颗星分到的高度越薄；舞台高度同步变成 rows × gap，于是像素间距恒定 */
+const yAt = (i: number, rows: number): number => round1(((i + 0.5) / rows) * 100)
+const station = (i: number, rows: number): Pt => [xAt(i), yAt(i, rows)]
+
+// ===== 曲线 =====
+//
+// 用 Catmull-Rom 把落脚点穿成一条光滑的线：每一段换算成一条三次贝塞尔，
+// 于是"整条路"（淡墨虚线）、"每一段路"（会被点亮的那一段）、
+// 以及撒在段上的小星点，都从同一份数据里取。
+
+interface Cubic {
+  a: Pt
+  c1: Pt
+  c2: Pt
+  b: Pt
 }
 
-const SIGNS: readonly Sign[] = [
-  {
-    // 白羊：一根折线，末端甩出第三颗
-    cn: '白羊座',
-    en: 'Aries',
-    box: [1.5, 5, 27, 36],
-    cloud: [74, 0, -2],
-    stars: [
-      { x: 0.08, y: 0.64, r: 3.0 },
-      { x: 0.34, y: 0.46, r: 2.4 },
-      { x: 0.54, y: 0.62, r: 1.9 },
-      { x: 0.88, y: 0.24, r: 2.5 },
-    ],
-    lines: [[0, 1], [1, 2], [1, 3]],
-  },
-  {
-    // 金牛：毕宿五那颗橙红的亮星 + V 形的脸 + 两只角，右上是昴星团
-    cn: '金牛座',
-    en: 'Taurus',
-    box: [30.5, 1, 31, 40],
-    cloud: [80, 2, 0],
-    stars: [
-      { x: 0.26, y: 0.52, r: 3.4 },
-      { x: 0.40, y: 0.36, r: 2.5 },
-      { x: 0.54, y: 0.44, r: 2.0 },
-      { x: 0.44, y: 0.60, r: 2.0 },
-      { x: 0.30, y: 0.62, r: 1.8 },
-      { x: 0.36, y: 0.08, r: 2.7 },
-      { x: 0.58, y: 0.78, r: 2.2 },
-      { x: 0.80, y: 0.28, r: 1.5 },
-      { x: 0.86, y: 0.35, r: 1.3 },
-      { x: 0.82, y: 0.40, r: 1.3 },
-      { x: 0.88, y: 0.22, r: 1.2 },
-    ],
-    lines: [[0, 1], [1, 2], [1, 3], [3, 4], [4, 0], [1, 5], [3, 6], [7, 8], [8, 9]],
-  },
-  {
-    // 双子：北河二、北河三两颗并排的亮星，各自往下拖出一条腿
-    cn: '双子座',
-    en: 'Gemini',
-    box: [64.5, 5, 28, 36],
-    cloud: [72, -2, 1],
-    stars: [
-      { x: 0.30, y: 0.16, r: 3.0 },
-      { x: 0.46, y: 0.28, r: 3.2 },
-      { x: 0.14, y: 0.44, r: 2.1 },
-      { x: 0.20, y: 0.70, r: 1.9 },
-      { x: 0.12, y: 0.88, r: 1.9 },
-      { x: 0.42, y: 0.54, r: 2.1 },
-      { x: 0.48, y: 0.78, r: 2.3 },
-      { x: 0.60, y: 0.92, r: 1.8 },
-    ],
-    lines: [[0, 1], [0, 2], [2, 3], [3, 4], [1, 5], [5, 6], [6, 7]],
-  },
-  {
-    // 狮子：镰刀形的头颈 + 后半身的三角，尾巴尖是五帝座一
-    cn: '狮子座',
-    en: 'Leo',
-    box: [0.5, 51, 31, 40],
-    cloud: [78, 1, 1],
-    stars: [
-      { x: 0.16, y: 0.80, r: 3.2 },
-      { x: 0.12, y: 0.60, r: 2.3 },
-      { x: 0.22, y: 0.42, r: 2.5 },
-      { x: 0.38, y: 0.36, r: 2.1 },
-      { x: 0.50, y: 0.50, r: 2.1 },
-      { x: 0.44, y: 0.68, r: 1.9 },
-      { x: 0.60, y: 0.74, r: 2.1 },
-      { x: 0.78, y: 0.54, r: 2.5 },
-      { x: 0.94, y: 0.70, r: 2.9 },
-    ],
-    lines: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 5], [5, 6], [6, 7], [7, 8], [6, 8]],
-  },
-  {
-    // 处女：角宿一在最下面，往上收成一个 Y
-    cn: '处女座',
-    en: 'Virgo',
-    box: [32.5, 47.5, 31, 42],
-    cloud: [73, -1, -1],
-    stars: [
-      { x: 0.52, y: 0.88, r: 3.4 },
-      { x: 0.42, y: 0.62, r: 2.0 },
-      { x: 0.30, y: 0.44, r: 2.4 },
-      { x: 0.14, y: 0.34, r: 2.0 },
-      { x: 0.20, y: 0.14, r: 1.8 },
-      { x: 0.50, y: 0.38, r: 2.1 },
-      { x: 0.70, y: 0.26, r: 1.8 },
-      { x: 0.84, y: 0.10, r: 1.8 },
-    ],
-    lines: [[0, 1], [1, 2], [2, 3], [3, 4], [2, 5], [5, 6], [6, 7]],
-  },
-  {
-    // 天蝎：心宿二（红）在中间偏上，长长的尾巴甩回来带个钩
-    cn: '天蝎座',
-    en: 'Scorpio',
-    box: [65.5, 48.5, 32, 43],
-    cloud: [81, 0, 2],
-    stars: [
-      { x: 0.14, y: 0.20, r: 2.2 },
-      { x: 0.22, y: 0.27, r: 2.0 },
-      { x: 0.29, y: 0.35, r: 2.4 },
-      { x: 0.40, y: 0.40, r: 3.6 },
-      { x: 0.50, y: 0.47, r: 2.0 },
-      { x: 0.57, y: 0.58, r: 2.0 },
-      { x: 0.55, y: 0.71, r: 2.0 },
-      { x: 0.63, y: 0.81, r: 2.0 },
-      { x: 0.75, y: 0.85, r: 1.8 },
-      { x: 0.86, y: 0.77, r: 2.4 },
-      { x: 0.90, y: 0.64, r: 2.2 },
-    ],
-    lines: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 7], [7, 8], [8, 9], [9, 10]],
-  },
-]
+/** 第 i 段（从第 i 个落脚点到第 i+1 个）的三次贝塞尔控制点 */
+function segment(i: number, rows: number): Cubic {
+  const p0 = station(Math.max(0, i - 1), rows)
+  const p1 = station(i, rows)
+  const p2 = station(i + 1, rows)
+  const p3 = station(Math.min(rows - 1, i + 2), rows)
+  return {
+    a: p1,
+    c1: [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6],
+    c2: [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6],
+    b: p2,
+  }
+}
 
-/** 星点整体放大系数：归一化的 r 是"星等"，真正画出来还得再大一圈才看得见光晕 */
-const STAR_SCALE = 1.28
+function cubicAt(k: Cubic, t: number): Pt {
+  const u = 1 - t
+  const a = u * u * u
+  const b = 3 * u * u * t
+  const c = 3 * u * t * t
+  const d = t * t * t
+  return [
+    a * k.a[0] + b * k.c1[0] + c * k.c2[0] + d * k.b[0],
+    a * k.a[1] + b * k.c1[1] + c * k.c2[1] + d * k.b[1],
+  ]
+}
 
-/** 非图片格里的文件图标（内联 SVG，不依赖字体/emoji） */
-function fileGlyph(): SVGSVGElement {
-  const svg = document.createElementNS(NS, 'svg')
-  svg.setAttribute('viewBox', '0 0 24 24')
-  svg.setAttribute('width', '26')
-  svg.setAttribute('height', '26')
-  svg.setAttribute('fill', 'none')
-  svg.setAttribute('stroke', 'currentColor')
-  svg.setAttribute('stroke-width', '1.6')
-  svg.setAttribute('stroke-linecap', 'round')
-  svg.setAttribute('stroke-linejoin', 'round')
-  const body = document.createElementNS(NS, 'path')
-  body.setAttribute('d', 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z')
-  const fold = document.createElementNS(NS, 'polyline')
-  fold.setAttribute('points', '14 3 14 8 19 8')
-  svg.append(body, fold)
-  return svg
+/** 一段路（不含起点的 M）——用来把几段拼成整条路 */
+function legC(k: Cubic): string {
+  const f = round1
+  return `C${f(k.c1[0])} ${f(k.c1[1])} ${f(k.c2[0])} ${f(k.c2[1])} ${f(k.b[0])} ${f(k.b[1])}`
+}
+
+/** 一段路的 d 属性（坐标直接是 0..100 的百分比） */
+function legD(k: Cubic): string {
+  const f = round1
+  return `M${f(k.a[0])} ${f(k.a[1])}${legC(k)}`
+}
+
+/** 整条路：所有星串成的一条线 */
+function fullD(rows: number): string {
+  let d = `M${round1(xAt(0))} ${round1(yAt(0, rows))}`
+  for (let i = 0; i < rows - 1; i++) d += legC(segment(i, rows))
+  return d
+}
+
+/** 定死的伪随机：每次重画都是同一片星空，不会"眨一下换了位置" */
+function rnd(seed: number): number {
+  const x = Math.sin(seed * 127.1 + 11.7) * 43758.5453
+  return x - Math.floor(x)
 }
 
 const round1 = (n: number): number => Math.round(n * 10) / 10
 
-/** 一个星座的连线：铺满整格的 SVG，坐标 0..100（x/y 各自拉伸，线摔不断就行） */
-function signLines(sign: Sign): SVGSVGElement {
-  const svg = document.createElementNS(NS, 'svg')
-  svg.setAttribute('class', 'con-lines')
-  svg.setAttribute('viewBox', '0 0 100 100')
-  // 非等比拉伸：星点是用 div 摆的（永远正圆），线被拉一下没人在意；
-  // 反过来用 meet 会在窄格子里留一圈白边，线就跟星星对不齐了。
-  svg.setAttribute('preserveAspectRatio', 'none')
-  svg.setAttribute('aria-hidden', 'true')
-  for (const [a, b] of sign.lines) {
-    const p = sign.stars[a]!
-    const q = sign.stars[b]!
-    const line = document.createElementNS(NS, 'line')
-    line.setAttribute('x1', String(round1(p.x * 100)))
-    line.setAttribute('y1', String(round1(p.y * 100)))
-    line.setAttribute('x2', String(round1(q.x * 100)))
-    line.setAttribute('y2', String(round1(q.y * 100)))
-    // 不跟随缩放：线宽恒定 1px，舞台上放大缩小都是同一根细线
-    line.setAttribute('vector-effect', 'non-scaling-stroke')
-    svg.append(line)
-  }
-  return svg
+/** 第 i 颗星的标注挂在哪一侧：避开从它出发（或通向它）的那一段路 */
+function labelSide(i: number, rows: number): 'left' | 'right' {
+  const cur = xAt(i)
+  const next = xAt(i + 1 < rows ? i + 1 : Math.max(0, i - 1))
+  const dx = i + 1 < rows ? next - cur : cur - next
+  return dx > 0 ? 'left' : 'right'
+}
+
+// ===== DOM =====
+
+function svgEl<K extends keyof SVGElementTagNameMap>(tag: K): SVGElementTagNameMap[K] {
+  return document.createElementNS(NS, tag)
 }
 
 interface Stage {
   stage: HTMLElement
-  signs: Map<number, HTMLElement>
-  names: Map<number, HTMLElement>
+  road: SVGSVGElement
+  guide: SVGPathElement
+  /** 新节点一律插在它前面：它是"压在最上层"的那一层的第一个 */
+  before: HTMLElement
+  /** 0 起：第 i 颗星 */
+  nodes: HTMLElement[]
+  /** 每颗星的标注容器、主标题、副标题 */
+  tags: HTMLElement[]
+  mains: HTMLElement[]
+  metas: HTMLElement[]
+  /** 0 起：第 i 段路（连第 i 与 i+1 颗星） */
+  legs: SVGPathElement[]
+  /** 每一段路上的小星点 */
+  embers: HTMLElement[][]
+  /** 当前摆了几行（= 星星颗数） */
+  rows: number
+}
+
+/** 造一颗星（不含位置：位置由 relayout 统一摆） */
+function addNode(s: Stage, i: number): void {
+  const node = el('span', 'con-node')
+  node.dataset.i = String(i + 1)
+  node.dataset.state = 'empty'
+  node.tabIndex = 0
+  node.setAttribute('role', 'button')
+
+  // 星云垫在最底下：照片若隐若现地"压在纸里"，星星浮在它上面
+  node.append(el('span', 'con-halo'))
+  node.append(el('span', 'con-ring'))
+
+  const d = MAGNITUDE_SEQ[i % MAGNITUDE_SEQ.length]!
+  // 三个尺寸都挂在 node 上：星、光晕、星芒共用一份星等。
+  // 7.0 是量出来的：再小四角形的角就读不出来了，整枚星退化成一颗白点。
+  node.style.setProperty('--d', `${round1(d * 7)}px`)
+  node.style.setProperty('--ray', `${round1(d * 15)}px`)
+  node.style.setProperty('--ray2', `${round1(d * 7.5)}px`)
+  // 错开呼吸：整片一起闪就成灯牌了
+  node.style.setProperty('--tw', `${round1(-1.9 * i)}s`)
+  // 光晕是单独一层：clip-path 会把同一元素上的 drop-shadow 一起裁掉，
+  // 所以发光不能靠星的 filter，得在它背后铺一层真的光
+  node.append(el('i', 'con-bloom'))
+  const spark = el('i', 'con-spark')
+  spark.append(el('i', 'con-diag'))
+  node.append(spark)
+
+  // 标注挂在星星的**外侧**：路往哪边走，字就避开哪边，否则永远压在线上
+  const tag = el('span', 'con-tag')
+  // 名字和 × 同一行（× 是拆分端才有的，按需 append 到这一行里）
+  const line = el('span', 'con-line')
+  const main = el('b', 'con-main')
+  line.append(main)
+  const meta = el('small', 'con-meta')
+  tag.append(line, meta)
+  node.append(tag)
+
+  s.stage.insertBefore(node, s.before)
+  s.nodes.push(node)
+  s.tags.push(tag)
+  s.mains.push(main)
+  s.metas.push(meta)
+}
+
+/** 造一段路（两层路径：光带 + 墨金线） */
+function addLeg(s: Stage): void {
+  const box = svgEl('g')
+  box.setAttribute('class', 'con-leg-pair')
+  const halo = svgEl('path')
+  halo.setAttribute('class', 'con-leg-halo')
+  halo.setAttribute('vector-effect', 'non-scaling-stroke')
+  const leg = svgEl('path')
+  leg.setAttribute('class', 'con-leg')
+  leg.setAttribute('vector-effect', 'non-scaling-stroke')
+  box.append(halo, leg)
+  s.road.append(box)
+  s.legs.push(leg)
+}
+
+/** 一段路上撒几颗小星点：数量按段序号变一点，免得每段都一模一样 */
+const emberCount = (i: number): number => 4 + (i % 3)
+
+/**
+ * 把一个舞台摆到 `rows` 行。
+ *
+ * 幂等：行数没变就直接返回（大多数时候是这样——只有层数跨过当前行数才会长）。
+ * 要改的东西有六样：星的位置、标签挂哪侧、整条路的 d、每段的 d、路上的星点、
+ * 以及舞台自己的高度（CSS 变量 `--rows`）。
+ */
+function relayout(s: Stage, rows: number): void {
+  const n = Math.max(MIN_ROWS, rows)
+  if (s.rows === n) return
+  s.rows = n
+
+  while (s.nodes.length < n) addNode(s, s.nodes.length)
+  while (s.legs.length < n - 1) addLeg(s)
+
+  s.nodes.forEach((node, i) => {
+    const x = xAt(i)
+    node.style.left = `${x}%`
+    node.style.top = `${yAt(i, n)}%`
+    // 标签躲开路线：路往哪边走，字就挂另一边
+    const side = labelSide(i, n)
+    const tag = s.tags[i] as HTMLElement
+    tag.className = `con-tag is-${side}`
+    // 名字能吃多宽，取决于这一侧还剩多少纸。给个死值 150px 的话，
+    // 「合同-2026-第 3 季度-最终签署版」一律截成「合同-2026-第 3 季…」——
+    // 而标签是每颗星独占一行的，长一点根本不会撞到邻居。
+    tag.style.setProperty('--tag-room', String(round1(side === 'right' ? 100 - x : x)))
+  })
+
+  s.guide.setAttribute('d', fullD(n))
+  s.legs.forEach((leg, i) => {
+    const d = legD(segment(i, n))
+    leg.setAttribute('d', d)
+    leg.previousElementSibling?.setAttribute('d', d)
+  })
+
+  for (let i = 0; i < n - 1; i++) syncEmbers(s, i, n)
+
+  s.stage.style.setProperty('--rows', String(n))
+  s.stage.setAttribute('aria-label', `星座外观：${n} 颗星连成一条路`)
+}
+
+/** 第 i 段路上的星点：位置跟着曲线重算，元素本身复用（亮了就不会再暗下去） */
+function syncEmbers(s: Stage, i: number, rows: number): void {
+  const count = emberCount(i)
+  let list = s.embers[i]
+  if (!list) {
+    list = []
+    s.embers[i] = list
+  }
+  while (list.length < count) {
+    const dot = el('i', 'con-ember')
+    dot.style.setProperty('--s', `${round1(1.3 + rnd(i * 13 + list.length) * 1.6)}px`)
+    // 一段路亮起来时，路上的星点按行走的方向依次亮，像脚步
+    dot.style.transitionDelay = `${(list.length + 1) * 70}ms`
+    s.stage.insertBefore(dot, s.before)
+    list.push(dot)
+  }
+  const k = segment(i, rows)
+  list.forEach((dot, idx) => {
+    const p = cubicAt(k, (idx + 1) / (count + 1))
+    dot.style.left = `${round1(p[0] + (rnd(i * 31 + idx) - 0.5) * 2.4)}%`
+    dot.style.top = `${round1(p[1] + (rnd(i * 57 + idx + 7) - 0.5) * 2.8)}%`
+  })
 }
 
 /**
- * 六格星图的骨架：琥珀底 + 星尘 + 六个星座 + 名字。
+ * 星图骨架：纸面 + 一条穿起所有星的路 + 六颗（起步时）虚星。
  *
- * 恢复端（往外取图）和拆分端（往里塞图）共用这一份，差别只在喂进去的事件——
- * 和碎片那套同一个思路，只是这里一格是一个星座而不是一块玻璃。
+ * 恢复端（往外取）和拆分端（往里塞）共用这一份，差别只在喂进去的事件。
  */
 function buildStage(): Stage {
   const stage = el('div', 'con-stage')
   stage.setAttribute('role', 'group')
-  stage.setAttribute('aria-label', `星座外观：${SLOTS} 个星座`)
+  stage.style.setProperty('--rows', String(MIN_ROWS))
 
-  // 底：旧星图的琥珀色纸面 + 一层很淡的星尘
-  stage.append(el('div', 'con-sky'), el('div', 'con-dust'))
+  // 纸的五层：底色 → 深浅 → 纤维 → 满天暗星 → 刻度盘 → 折痕 → 陈年痕迹 → 颗粒
+  stage.append(
+    el('div', 'con-sky'),
+    el('div', 'con-mottle'),
+    el('div', 'con-fiber'),
+    el('div', 'con-field'),
+    el('div', 'con-chart'),
+    el('div', 'con-crease'),
+    el('div', 'con-stain'),
+    el('div', 'con-grain'),
+  )
 
-  const signs = new Map<number, HTMLElement>()
-  const names = new Map<number, HTMLElement>()
+  // 整条路先铺一层淡墨：还没走到的那一段也看得见，路才是"路"
+  const road = svgEl('svg')
+  road.setAttribute('class', 'con-road')
+  road.setAttribute('viewBox', '0 0 100 100')
+  // 非等比拉伸：星点用 div 摆（永远正圆），线被拉一下没人在意；
+  // 反过来用 meet 会在纸上留一圈空白，线就跟星星对不齐了
+  road.setAttribute('preserveAspectRatio', 'none')
+  road.setAttribute('aria-hidden', 'true')
 
-  SIGNS.slice(0, SLOTS).forEach((sign, k) => {
-    const i = k + 1
-    const box = el('div', 'con-sign is-empty')
-    box.dataset.i = String(i)
-    box.style.left = `${sign.box[0]}%`
-    box.style.top = `${sign.box[1]}%`
-    box.style.width = `${sign.box[2]}%`
-    box.style.height = `${sign.box[3]}%`
+  const guide = svgEl('path')
+  guide.setAttribute('class', 'con-guide')
+  guide.setAttribute('vector-effect', 'non-scaling-stroke')
+  road.append(guide)
+  stage.append(road)
 
-    // 星云（照片的容身之处）在最底下：星座的线压在它上面，像照片被星图盖住一角
-    const cloud = el('div', 'con-cloud')
-    cloud.style.width = `${sign.cloud[0]}%`
-    cloud.style.height = `${sign.cloud[0]}%`
-    cloud.style.setProperty('--dx', `${sign.cloud[1]}%`)
-    cloud.style.setProperty('--dy', `${sign.cloud[2]}%`)
-    // 「+ 放图」跟着星点的重心走：按格子正中摆的话，狮子座那种上密下疏的星座
-    // 会把加号顶到星座外面去
-    cloud.style.setProperty('--ay', `${round1((sign.stars.reduce((a, s) => a + s.y, 0) / sign.stars.length) * 100)}%`)
-    box.append(cloud)
-    box.append(signLines(sign))
+  // 压在最上层：纸边、卷轴的阴影、纸屑。星星在纸下面，才像印上去的
+  const dust = el('div', 'con-dust')
 
-    // 星点：div 摆位，永远正圆；光晕交给 CSS
-    for (const s of sign.stars) {
-      const star = el('i', 'con-star')
-      star.style.left = `${round1(s.x * 100)}%`
-      star.style.top = `${round1(s.y * 100)}%`
-      const d = round1(s.r * STAR_SCALE)
-      star.style.width = `${d}px`
-      star.style.height = `${d}px`
-      // 光晕大小跟着星点大小走，不然大星和小星的晕一样粗
-      star.style.setProperty('--r', `${d}px`)
-      box.append(star)
-    }
-    stage.append(box)
-    signs.set(i, box)
+  stage.append(dust, el('div', 'con-edge'))
 
-    // 名字挂在舞台上而不是格子里：格子的定位只够装星座，名字要落在它下面，
-    // 而且不能被格子的宽度切断
-    const name = el('div', 'con-name is-empty')
-    name.dataset.i = String(i)
-    name.append(el('span', 'con-cn', sign.cn), el('span', 'con-sub', sign.en))
-    stage.append(name)
-    names.set(i, name)
-  })
-
-  // 名字在星座的正下方居中
-  const placeNames = (): void => {
-    SIGNS.slice(0, SLOTS).forEach((sign, k) => {
-      const name = names.get(k + 1)
-      if (!name) return
-      name.style.left = `${sign.box[0] + sign.box[2] / 2}%`
-      // 贴在**星点**的最低处而不是格子的底边：星图上的标注就该紧跟着那个星座，
-      // 按格子算会空出一大截，名字看起来像另一样东西的标题
-      const low = Math.max(...sign.stars.map((s) => s.y))
-      name.style.top = `${round1(sign.box[1] + sign.box[3] * low + 2)}%`
-    })
+  const s: Stage = {
+    stage,
+    road,
+    guide,
+    before: dust,
+    nodes: [],
+    tags: [],
+    mains: [],
+    metas: [],
+    legs: [],
+    embers: [],
+    rows: MIN_ROWS,
   }
-  placeNames()
-
-  return { stage, signs, names }
+  // 先按初始行数摆好：空着的时候也得是一条看得见的路
+  s.rows = 0
+  relayout(s, MIN_ROWS)
+  return s
 }
 
-/** 换一个星座的状态（类名 + 让 CSS 决定星点亮到什么程度） */
-function setSignState(sign: HTMLElement, cls: string): void {
-  sign.className = `con-sign ${cls}`
+function setState(node: HTMLElement, state: string): void {
+  node.dataset.state = state
 }
+
+type TagState = 'empty' | 'locked' | 'image' | 'file' | 'fake'
+
+function paintTag(s: Stage, i: number, state: TagState, main: string, meta: string): void {
+  const m = s.mains[i]
+  const t = s.metas[i]
+  if (!m || !t) return
+  m.textContent = main
+  t.textContent = meta
+  const tag = s.tags[i]
+  // 只换状态，不碰左右：className 是 relayout 管的（它还带着 is-left / is-right）
+  if (tag) tag.dataset.state = state
+}
+
+/** 走到第几颗星为止：把前面几段路点亮（含路上的星点） */
+function walkTo(s: Stage, reached: number): void {
+  s.legs.forEach((leg, i) => {
+    const lit = i < reached - 1
+    // 点在整段上：两层（光晕 + 墨金线）一起亮
+    leg.parentElement?.classList.toggle('is-lit', lit)
+    for (const e of s.embers[i] ?? []) e.classList.toggle('is-lit', lit)
+  })
+}
+
+// ===== 恢复端：往外出图 =====
 
 export function createConstellationView(): RestoreView {
   const root = el('div', 'con-view')
-  const { stage, signs, names } = buildStage()
+  const s = buildStage()
+  const { stage, nodes } = s
 
   let intent: ShareIntent | null = null
   const canAdd = (): boolean => intent !== null && intent.allowed()
-  const filled = (hit: HTMLElement | null): boolean =>
-    !!hit && (hit.classList.contains('is-image') || hit.classList.contains('is-file'))
+  const action = new Map<number, () => void>()
 
-  // 点空白天空或还没亮的星座 = 补分片；点亮了的星座点了是下载
-  stage.addEventListener('click', (e) => {
-    const hit = (e.target as HTMLElement).closest<HTMLElement>('.con-sign')
-    if (filled(hit)) return
+  const pick = (): void => {
     if (!canAdd()) return
     intent!.pick()
+  }
+
+  stage.addEventListener('click', (e) => {
+    const node = (e.target as HTMLElement).closest<HTMLElement>('.con-node')
+    if (!node) {
+      // 点纸面（没点到星）= 补分片：整张图都是入口
+      pick()
+      return
+    }
+    const act = action.get(Number(node.dataset.i))
+    if (act) act()
+    else pick()
   })
   stage.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return
-    const hit = (e.target as HTMLElement).closest<HTMLElement>('.con-sign')
-    if (filled(hit)) return
-    if (!canAdd()) return
+    const node = (e.target as HTMLElement).closest<HTMLElement>('.con-node')
+    if (!node) return
+    const act = action.get(Number(node.dataset.i))
+    if (!act) return
     e.preventDefault()
-    intent!.pick()
+    act()
   })
   stage.addEventListener('dragover', (e) => {
     if (!canAdd()) return
@@ -349,38 +433,22 @@ export function createConstellationView(): RestoreView {
 
   root.append(stage, info)
   let opened = 0
-
-  /** 副标题写文件名（或状态）；主标题永远是星座名——星图上的字是星座的名字，
-      不是文件的名字，文件名挤掉它，这张图就不像星图了。 */
-  const setSub = (i: number, text: string, kind: string): void => {
-    const name = names.get(i)
-    if (!name) return
-    name.className = `con-name ${kind}`
-    const sub = name.querySelector('.con-sub') as HTMLElement
-    sub.textContent = text
-    sub.classList.toggle('is-file', kind === 'is-image' || kind === 'is-file')
-  }
+  let reached = 0
 
   const fill = (i: number, l: LayerInfo): void => {
-    const sign = signs.get(i)
-    if (!sign) return
-    const cloud = sign.querySelector('.con-cloud') as HTMLElement
-    cloud.textContent = ''
+    const node = nodes[i - 1]
+    if (!node) return
+    const halo = node.querySelector('.con-halo') as HTMLElement
+    halo.textContent = ''
+
     const mime = sniffImageMime(l.data)
-    const kind = mime ? 'is-image' : 'is-file'
-    setSignState(sign, kind)
-    setSub(i, baseName(l.name), kind)
-    sign.title = `${l.name} · ${fmtSize(l.data.length)} · 点击下载`
-    sign.tabIndex = 0
-    sign.setAttribute('role', 'button')
+    const state: TagState = mime ? 'image' : 'file'
+    setState(node, state)
+    paintTag(s, i - 1, state, baseName(l.name), `第 ${i} 层`)
+    node.title = `${l.name} · ${fmtSize(l.data.length)} · 点击下载`
     const grab = (): void => download(l.name, l.data)
-    sign.addEventListener('click', grab)
-    sign.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault()
-        grab()
-      }
-    })
+    action.set(i, grab)
+
     if (mime) {
       const url = trackUrl(URL.createObjectURL(new Blob([l.data], { type: mime })))
       const img = document.createElement('img')
@@ -388,18 +456,16 @@ export function createConstellationView(): RestoreView {
       img.src = url
       img.alt = l.name
       img.decoding = 'sync'
-      cloud.append(img)
+      halo.append(img)
       // 和碎片踩过的同一个坑：带遮罩/动画的子树里 img.decode() 不 settle，用 load 兜底
-      const show = (): void => cloud.classList.add('is-shown')
+      const show = (): void => halo.classList.add('is-shown')
       if (img.complete) show()
       else {
         img.addEventListener('load', show, { once: true })
         img.addEventListener('error', show, { once: true })
       }
-    } else {
-      cloud.append(el('div', 'con-doc', fileGlyph(), el('div', 'con-file', l.name)))
-      cloud.classList.add('is-shown')
     }
+    // 非图片：星云里什么都不放。名字已经常显在标签上，图片才值得浮出来看。
   }
 
   return {
@@ -407,41 +473,53 @@ export function createConstellationView(): RestoreView {
     attachShare(next) {
       intent = next
       stage.classList.add('is-shareable')
-      for (const s of signs.values()) if (s.tabIndex < 0) s.tabIndex = 0
     },
     lock(i, k, have) {
-      const sign = signs.get(i)
-      if (!sign) return
-      setSignState(sign, 'is-locked')
-      sign.title = `第 ${i} 个星座需要 ${k} 片，当前 ${have} 片 · 点一下补充分片`
-      sign.tabIndex = 0
-      sign.setAttribute('role', 'button')
-      setSub(i, `需要 ${k} 片`, 'is-locked')
+      // 这一层真的存在（只是片不够），所以星也就该在：行数不够就先长出来
+      relayout(s, i)
+      const node = nodes[i - 1]
+      if (!node) return
+      setState(node, 'locked')
+      node.title = `第 ${i} 颗星还差 ${k} 片（已有 ${have} 片）· 点一下补充分片`
+      paintTag(s, i - 1, 'locked', `需要 ${k} 片`, `第 ${i} 层`)
     },
-    fake(i, k) {
-      const sign = signs.get(i)
-      if (!sign) return
-      setSignState(sign, 'is-fake')
-      sign.title = `第 ${i} 个星座是假层：${k} 片插出来的密钥对不上`
-      setSub(i, '解不开', 'is-fake')
+    fake(i) {
+      relayout(s, i)
+      const node = nodes[i - 1]
+      if (!node) return
+      setState(node, 'fake')
+      node.title = `第 ${i} 颗星是假层：凑够也解不开`
+      paintTag(s, i - 1, 'fake', '解不开', `第 ${i} 层`)
+      action.delete(i)
+      reached = Math.max(reached, i - 1)
+      walkTo(s, reached)
     },
     unlock(layer) {
+      // 恢复端只知道"已经解到第几层"，不知道后面还有几层——所以路是一段一段长出来的：
+      // 第六层解开时本来就摆着六颗星，第七层真来了，才往下多长一颗
+      relayout(s, layer.index)
       fill(layer.index, layer)
-      const card = levelCard(layer, { preview: false, unit: '个' })
+      reached = Math.max(reached, layer.index)
+      walkTo(s, reached)
+      // 图层里才给大图预览：星图上只留星，要看内容在下面这张卡里看
+      const card = levelCard(layer, { unit: '颗' })
       info.hidden = false
       info.append(card)
       opened++
-      sum.textContent = `文件信息与校验（${opened} 个）`
+      sum.textContent = `文件信息与校验（${opened} 层）`
       return otsHost(card)
     },
   }
 }
 
-// ===== 拆分端：同一张星图，往里放照片 =====
+// ===== 拆分端：把文件往星图上放 =====
+
 export function createConstellationSplitView(): SplitView {
   const root = el('div', 'con-view con-split')
-  const { stage, signs, names } = buildStage()
+  const s = buildStage()
+  const { stage, nodes } = s
   stage.classList.add('is-shareable')
+
   const note = el('div', 'hint con-split-note')
   root.append(stage, note)
 
@@ -453,58 +531,45 @@ export function createConstellationSplitView(): SplitView {
     urls = []
   }
 
-  const cloudOf = (i: number): HTMLElement => signs.get(i)!.querySelector('.con-cloud') as HTMLElement
-  const nameOf = (i: number): HTMLElement => names.get(i)!
-
-  const resetSign = (i: number): void => {
-    const sign = signs.get(i)!
-    setSignState(sign, 'is-empty')
-    sign.title = `第 ${i} 个星座还空着：点一下放一张图`
-    sign.tabIndex = 0
-    sign.setAttribute('role', 'button')
-    const cloud = cloudOf(i)
-    cloud.textContent = ''
-    cloud.classList.remove('is-shown')
-    cloud.append(el('div', 'con-add', el('div', 'con-add-plus', '+'), el('div', 'con-add-text', '放图')))
-    const name = nameOf(i)
-    name.className = 'con-name is-empty'
-    const sub = name.querySelector('.con-sub') as HTMLElement
-    sub.textContent = SIGNS[i - 1]!.en
-    sub.classList.remove('is-file')
+  const reset = (i: number): void => {
+    const node = nodes[i - 1]!
+    setState(node, 'empty')
+    node.title = `第 ${i} 颗星还空着：点一下放一个文件`
+    const halo = node.querySelector('.con-halo') as HTMLElement
+    halo.textContent = ''
+    halo.classList.remove('is-shown')
+    // × 是上一轮 append 进去的：不扫掉的话，每重画一次就多一颗
+    for (const x of s.tags[i - 1]!.querySelectorAll('.con-x')) x.remove()
+    paintTag(s, i - 1, 'empty', '放文件', `第 ${i} 层`)
   }
 
-  const fillSign = (c: SplitCell): void => {
+  const fill = (c: SplitCell): void => {
     const i = c.index
-    if (i > SLOTS) return
-    const sign = signs.get(i)!
-    const cloud = cloudOf(i)
-    cloud.textContent = ''
-    cloud.classList.remove('is-shown')
-    const name = nameOf(i)
-    const sub = name.querySelector('.con-sub') as HTMLElement
+    const node = nodes[i - 1]
+    if (!node) return
+    const halo = node.querySelector('.con-halo') as HTMLElement
+    halo.textContent = ''
+    halo.classList.remove('is-shown')
 
     const remove = el('button', 'con-x', '×') as HTMLButtonElement
     remove.type = 'button'
     remove.dataset.i = String(i)
-    remove.title = '把这一层撤掉'
+    remove.title = '把这一颗撤掉'
 
     if (c.fake) {
-      setSignState(sign, 'is-fake')
-      sign.title = `第 ${i} 层是假文件层：凑够 ${c.k} 片也解不开`
-      name.className = 'con-name is-fake'
-      sub.textContent = '假文件层'
-      sub.classList.add('is-file')
-      cloud.append(el('div', 'con-doc', fileGlyph(), el('div', 'con-file', '假文件层')))
-      cloud.classList.add('is-shown')
-      name.append(remove)
+      setState(node, 'fake')
+      node.title = `第 ${i} 层是假文件层：凑够 ${c.k} 片也解不开`
+      paintTag(s, i - 1, 'fake', '假文件层', `第 ${i} 层`)
+      s.tags[i - 1]!.querySelector('.con-line')!.append(remove)
       return
     }
 
     const file = c.file
     const image = file !== null && isImageFileLike(file.name, file.type)
-    setSignState(sign, image ? 'is-image' : 'is-file')
-    sign.title = `${c.name} · ${fmtSize(c.size)} · 第 ${i} 层，需要 ${c.k} 片`
-    name.className = `con-name ${image ? 'is-image' : 'is-file'}`
+    const state: TagState = image ? 'image' : 'file'
+    setState(node, state)
+    node.title = `${c.name} · ${fmtSize(c.size)} · 第 ${i} 层，需要 ${c.k} 片`
+    paintTag(s, i - 1, state, baseName(c.name), `第 ${i} 层 · ${c.k} 片`)
     if (image && file) {
       const url = URL.createObjectURL(file)
       urls.push(url)
@@ -513,15 +578,10 @@ export function createConstellationSplitView(): SplitView {
       img.src = url
       img.alt = c.name
       img.decoding = 'sync'
-      cloud.append(img)
-      cloud.classList.add('is-shown')
-    } else {
-      cloud.append(el('div', 'con-doc', fileGlyph(), el('div', 'con-file', c.name)))
-      cloud.classList.add('is-shown')
+      halo.append(img)
+      halo.classList.add('is-shown')
     }
-    sub.textContent = baseName(c.name)
-    sub.classList.add('is-file')
-    name.append(remove)
+    s.tags[i - 1]!.querySelector('.con-line')!.append(remove)
   }
 
   stage.addEventListener('click', (e) => {
@@ -531,15 +591,15 @@ export function createConstellationSplitView(): SplitView {
       intent?.remove(Number(x.dataset.i) - 1)
       return
     }
-    const hit = (e.target as HTMLElement).closest<HTMLElement>('.con-sign')
-    if (hit && !hit.classList.contains('is-empty')) return
+    const node = (e.target as HTMLElement).closest<HTMLElement>('.con-node')
+    if (node && node.dataset.state !== 'empty') return
     if (!canAdd()) return
     intent!.pick()
   })
   stage.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return
-    const hit = (e.target as HTMLElement).closest<HTMLElement>('.con-sign')
-    if (hit && !hit.classList.contains('is-empty')) return
+    const node = (e.target as HTMLElement).closest<HTMLElement>('.con-node')
+    if (!node || node.dataset.state !== 'empty') return
     if (!canAdd()) return
     e.preventDefault()
     intent!.pick()
@@ -567,11 +627,16 @@ export function createConstellationSplitView(): SplitView {
     },
     render(cells) {
       release()
-      for (let i = 1; i <= SLOTS; i++) resetSign(i)
-      for (const c of cells) fillSign(c)
+      // 永远多摆一颗虚星：六颗都填满了，下面那颗"下一颗"就该出现了，
+      // 不然用户看不出这条路还能往下走
+      relayout(s, Math.max(MIN_ROWS, cells.length + 1))
+      for (let i = 1; i <= s.nodes.length; i++) reset(i)
+      for (const c of cells) fill(c)
+      walkTo(s, cells.length)
+      const total = s.nodes.length
       note.textContent = cells.length
-        ? `${cells.length} 个星座已就位：第 1 个要 1 片，第 ${cells.length} 个要 ${cells.length} 片。`
-        : '六个星座都还空着：点任意一个放一张照片。'
+        ? `${cells.length} 颗星已亮，第 ${cells.length + 1} 颗还空着：第 1 颗要 1 片，第 ${cells.length} 颗要 ${cells.length} 片。`
+        : `${total} 颗星都还暗着：点任意一颗放一个文件。放满之后路会继续往下长。`
     },
   }
 }

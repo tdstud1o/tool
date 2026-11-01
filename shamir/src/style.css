@@ -113,6 +113,19 @@ body {
   -webkit-text-fill-color: transparent;
   width: fit-content;
 }
+/* 英文名跟着中文名一起走，但要退到次要位置：字号小一档、字距放开、用次色。
+   注意父级开了 background-clip: text + 文字透明，子元素必须自己给 text-fill-color，
+   否则它会跟着一起透明，反而露出父级渐变的一块色斑。 */
+.hero-en {
+  margin-left: 0.2em;
+  font-size: 0.62em;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--secondary);
+  -webkit-text-fill-color: var(--secondary);
+  vertical-align: 0.18em;
+}
 .hero-sub { margin: 0.5rem 0 0; color: var(--secondary); font-size: 0.95rem; }
 .hero-badges { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.9rem; }
 .badge {

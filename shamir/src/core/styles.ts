@@ -3,7 +3,7 @@
 // 外观不是加密的一部分，它决定「拿到密文的人看到什么」：
 //   默认     只有参数 + 密文，恢复后按普通文件卡呈现；
 //   碎片     密文本身是一幅被打碎的画：恢复端把内容摆成 6 格碎片，解锁一格亮一格；
-//   星座     一张琥珀色旧星图：一层一个星座，凑够才连得起线，星云里透出那张照片。
+//   星座     一张琥珀色旧星图：一层点亮一颗星，星星自上而下连成一条路，层数不限。
 //
 // 三条硬规则（与 TLV tag 的约定一致）：
 //   1. 编号一旦发布冻结，新增风格只在尾部追加，禁止改义/回收；
@@ -34,7 +34,7 @@ export const STYLE_LIST: readonly StyleSpec[] = [
   { id: STYLE.CONSTELLATION, key: 'constellation', label: '星座', splitReady: true },
 ]
 
-/** 自带界面的外观（碎片 / 星座）都摆 6 格：和拆分端的层数上限一致 */
+/** 碎片外观的格数：和它的层数上限一致。星座不封顶，自己按层数往下长，不用这个值 */
 export const STAGE_SLOTS = 6
 export const FRAGMENT_SLOTS = STAGE_SLOTS
 
